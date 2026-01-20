@@ -77,7 +77,7 @@ Please download the datasets ([LAVIB](https://github.com/alexandrosstergiou/LAVI
 ```
 
 ### Download Checkpoints
-We provide pre-trained model weights, available for download [here](https://huggingface.co/zhZ524/EDEN/tree/main), and recommend saving them in the `checkpoints` folder.
+We provide pre-trained model weights, available for download [here](https://huggingface.co/zhZ524/EDEN/tree/main), and recommend saving them in the `data/models/eden_checkpoint` folder.
 
 ### Inference with EDEN
 After downloading the pretrained checkpoints, run the following command to interpolate images or videos with EDEN. The interpolation results are then saved to `interpolation_outputs` folder.

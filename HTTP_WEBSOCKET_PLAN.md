@@ -621,7 +621,7 @@ import os
 CLOUD_SERVER_URL = os.getenv("CLOUD_SERVER_URL", "http://localhost:8000")
 EDGE_SERVER_URL = os.getenv("EDGE_SERVER_URL", "http://localhost:8001")
 
-MODEL_PATH = os.getenv("MODEL_PATH", "./checkpoints/eden.pth")
+MODEL_PATH = os.getenv("MODEL_PATH", "./data/models/eden_checkpoint/eden.pth")
 DEVICE = os.getenv("DEVICE", "cuda:0")  # 云端用cuda:0，边缘用cuda:1
 ```
 

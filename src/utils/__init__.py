@@ -1,8 +1,19 @@
 from src.utils.embedding import TimestepEmbedder, get_pos_embedding
-from src.utils.klperceptual import KLLPIPSWithDiscriminator
 from src.utils.distributions import DiagonalGaussianDistribution
-from src.utils.cal_metrics import CalMetrics
 import torch
+
+# 训练相关：lpips 可能在纯推理环境中未安装。
+# 为了不影响插帧/推理链路（只需要 embedding/preprocess 等），这里做可选导入。
+try:
+    from src.utils.klperceptual import KLLPIPSWithDiscriminator  # noqa: F401
+except ModuleNotFoundError:
+    KLLPIPSWithDiscriminator = None  # type: ignore
+
+# 评测相关：同样依赖 lpips，推理环境可选
+try:
+    from src.utils.cal_metrics import CalMetrics  # noqa: F401
+except ModuleNotFoundError:
+    CalMetrics = None  # type: ignore
 
 
 class InputPadder:
