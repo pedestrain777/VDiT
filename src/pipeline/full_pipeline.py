@@ -30,6 +30,8 @@ def run_full_pipeline(
     output_path: str,
     cfg: FullPipelineConfig,
     log_file: Optional[str] = None,
+    save_sampled_video_path: Optional[str] = None,
+    save_keyframes_video_path: Optional[str] = None,
     save_wan_video_path: Optional[str] = None,
 ) -> None:
     """
@@ -64,9 +66,10 @@ def run_full_pipeline(
             ckpt_dir=wan_ckpt_dir,
             cfg=cfg.wan,
         )
-        # 可选保存 WAN 中间视频（便于 debug / 对齐）
-        if save_wan_video_path:
-            write_video_tensor(save_wan_video_path, frames, fps=fps_src)
+
+    sampled_video_path = save_sampled_video_path or save_wan_video_path
+    if sampled_video_path:
+        write_video_tensor(sampled_video_path, frames, fps=float(fps_src))
 
     # 进入插帧 pipeline（不落盘中间 mp4，直接 tensor 传递）
     run_interpolation_pipeline_from_frames(
@@ -75,6 +78,6 @@ def run_full_pipeline(
         output_path=output_path,
         cfg=cfg.iframe,
         log_file=log_file,
+        save_keyframes_video_path=save_keyframes_video_path,
     )
-
 

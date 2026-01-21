@@ -68,6 +68,18 @@ def main() -> None:
 
     # 可选：保存 WAN 中间视频
     p.add_argument("--save_wan_video", type=str, default=None, help="save WAN raw/downsampled video for debugging")
+    p.add_argument(
+        "--save_sampled_video",
+        type=str,
+        default=None,
+        help="save sampled video (after uniform/random sampling stage)",
+    )
+    p.add_argument(
+        "--save_keyframes_video",
+        type=str,
+        default=None,
+        help="save keyframes-only preview video (after keyframe selection in VDiT)",
+    )
 
     args = p.parse_args()
 
@@ -79,6 +91,10 @@ def main() -> None:
     os.makedirs(os.path.dirname(args.log_file) or ".", exist_ok=True)
     if args.save_wan_video:
         os.makedirs(os.path.dirname(args.save_wan_video) or ".", exist_ok=True)
+    if args.save_sampled_video:
+        os.makedirs(os.path.dirname(args.save_sampled_video) or ".", exist_ok=True)
+    if args.save_keyframes_video:
+        os.makedirs(os.path.dirname(args.save_keyframes_video) or ".", exist_ok=True)
 
     # 延迟导入（与 run_pipeline.py 一致）
     from src.generators.wan_t2v import WanGenerateConfig
@@ -126,11 +142,12 @@ def main() -> None:
         output_path=args.output_path,
         cfg=full_cfg,
         log_file=args.log_file,
+        save_sampled_video_path=args.save_sampled_video,
+        save_keyframes_video_path=args.save_keyframes_video,
         save_wan_video_path=args.save_wan_video,
     )
 
 
 if __name__ == "__main__":
     main()
-
 

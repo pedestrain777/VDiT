@@ -1,9 +1,13 @@
 from torch import nn
 import torch
+import torch.nn.functional as F
+
 try:
-    from xformers.ops import memory_efficient_attention
-except ImportError:
-    print("Warning: please install xformers if you want to use xformers!")
+    from xformers.ops import memory_efficient_attention  # type: ignore
+except Exception:
+    memory_efficient_attention = None
+
+_XFORMERS_FALLBACK_WARNED = False
 
 
 class Attention(nn.Module):
@@ -32,8 +36,37 @@ class Attention(nn.Module):
         return output
 
     def attention_with_xformers(self, q, k, v):
-        output = memory_efficient_attention(q, k, v, p=self.attn_drop_rate, scale=self.scale)
-        return output
+        global _XFORMERS_FALLBACK_WARNED
+        if memory_efficient_attention is None:
+            if not _XFORMERS_FALLBACK_WARNED:
+                print("[Attention] xformers not available -> fallback to torch SDPA.")
+                _XFORMERS_FALLBACK_WARNED = True
+            return self._attention_with_sdpa(q, k, v)
+        try:
+            return memory_efficient_attention(q, k, v, p=self.attn_drop_rate, scale=self.scale)
+        except Exception as e:
+            if not _XFORMERS_FALLBACK_WARNED:
+                print(
+                    f"[Attention] xformers attention failed ({type(e).__name__}: {e}). "
+                    "Fallback to torch SDPA."
+                )
+                _XFORMERS_FALLBACK_WARNED = True
+            return self._attention_with_sdpa(q, k, v)
+
+    def _attention_with_sdpa(self, q, k, v):
+        q_ = q.permute(0, 2, 1, 3).contiguous()
+        k_ = k.permute(0, 2, 1, 3).contiguous()
+        v_ = v.permute(0, 2, 1, 3).contiguous()
+        dropout_p = float(self.attn_drop_rate) if self.training else 0.0
+        try:
+            out = F.scaled_dot_product_attention(
+                q_, k_, v_, attn_mask=None, dropout_p=dropout_p, is_causal=False, scale=self.scale
+            )
+        except TypeError:
+            out = F.scaled_dot_product_attention(
+                q_ * self.scale, k_, v_, attn_mask=None, dropout_p=dropout_p, is_causal=False
+            )
+        return out.permute(0, 2, 1, 3).contiguous()
 
     @staticmethod
     def reshape_cond(x, ph, pw):

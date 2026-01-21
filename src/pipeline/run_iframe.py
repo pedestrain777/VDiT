@@ -36,6 +36,7 @@ def run_interpolation_pipeline_from_frames(
     output_path: str,
     cfg: PipelineConfig,
     log_file: Optional[str] = None,
+    save_keyframes_video_path: Optional[str] = None,
 ) -> None:
     """
     核心插帧 pipeline（与 video_path 解耦）：
@@ -50,8 +51,8 @@ def run_interpolation_pipeline_from_frames(
         raise ValueError(f"fps_src must be > 0, got {fps_src}")
 
     num_frames = int(frames.shape[0])
-    duration = num_frames / float(fps_src)
-    target_len = int(duration * cfg.target_fps)
+    duration = (num_frames - 1) / float(fps_src)
+    target_len = int(round(duration * float(cfg.target_fps))) + 1
     if target_len < 2:
         raise ValueError("target_len < 2，输入视频太短或 target_fps 太小。")
 
@@ -64,6 +65,11 @@ def run_interpolation_pipeline_from_frames(
         init_frames = random_keyframes(frames, k=cfg.keyframes_k, seed=cfg.seed)
     else:
         raise ValueError(f"unknown keyframe_mode: {cfg.keyframe_mode}")
+
+    if save_keyframes_video_path is not None:
+        keyframes_tensor = torch.cat(init_frames, dim=0)
+        os.makedirs(os.path.dirname(save_keyframes_video_path) or ".", exist_ok=True)
+        write_video_tensor(save_keyframes_video_path, keyframes_tensor, fps=float(fps_src))
 
     if len(init_frames) > target_len:
         raise ValueError(
@@ -123,5 +129,4 @@ def run_interpolation_pipeline(
         cfg=cfg,
         log_file=log_file,
     )
-
 
