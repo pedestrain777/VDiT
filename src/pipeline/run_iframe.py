@@ -29,27 +29,35 @@ class PipelineConfig:
     weights: ScorerWeights = ScorerWeights()
 
 
-def run_interpolation_pipeline(
+def run_interpolation_pipeline_from_frames(
     *,
-    video_path: str,
+    frames: torch.Tensor,
+    fps_src: float,
     output_path: str,
     cfg: PipelineConfig,
     log_file: Optional[str] = None,
 ) -> None:
     """
-    当前阶段落地：关键帧 -> (score_fn=5信息融合) greedy_refine -> EDEN 插帧 -> 输出视频
+    核心插帧 pipeline（与 video_path 解耦）：
+      关键帧(均匀/随机/全帧) -> 5信息融合打分 -> greedy_refine(自适应决定每段插多少帧) -> EDEN 插帧 -> 输出视频
 
-    未来接 WAN:
-    wan->生成视频->(本函数)
+    frames: [T,3,H,W] float in [0,1]
+    fps_src: 输入视频 fps（对 duration 与 target_len 计算很重要）
     """
-    frames, info = read_video_tensor(video_path)
-    duration = info.num_frames / info.fps
+    if frames.ndim != 4 or frames.shape[1] != 3:
+        raise ValueError(f"Expect frames [T,3,H,W], got {tuple(frames.shape)}")
+    if fps_src <= 0:
+        raise ValueError(f"fps_src must be > 0, got {fps_src}")
+
+    num_frames = int(frames.shape[0])
+    duration = num_frames / float(fps_src)
     target_len = int(duration * cfg.target_fps)
     if target_len < 2:
         raise ValueError("target_len < 2，输入视频太短或 target_fps 太小。")
 
+    # -------- 关键帧选择 --------
     if cfg.keyframe_mode == "all":
-        init_frames = [frames[i].unsqueeze(0).cpu() for i in range(info.num_frames)]
+        init_frames = [frames[i].unsqueeze(0).cpu() for i in range(num_frames)]
     elif cfg.keyframe_mode == "uniform":
         init_frames = uniform_keyframes(frames, k=cfg.keyframes_k)
     elif cfg.keyframe_mode == "random":
@@ -63,6 +71,7 @@ def run_interpolation_pipeline(
             f"请先降低 keyframes_k 或调高 target_fps。"
         )
 
+    # -------- 插帧器与打分器 --------
     eden = EdenInterpolator(
         config_path=cfg.eden_config,
         device=cfg.eden_device,
@@ -81,6 +90,7 @@ def run_interpolation_pipeline(
     def interp_fn(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
         return eden.interpolate(a, b)
 
+    # -------- 自适应插帧数量 --------
     out_frames = greedy_refine(
         init_frames,
         target_len=target_len,
@@ -93,5 +103,25 @@ def run_interpolation_pipeline(
     out = torch.cat(out_frames, dim=0)  # [T,3,H,W]
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     write_video_tensor(output_path, out, fps=cfg.target_fps)
+
+
+def run_interpolation_pipeline(
+    *,
+    video_path: str,
+    output_path: str,
+    cfg: PipelineConfig,
+    log_file: Optional[str] = None,
+) -> None:
+    """
+    兼容原用法：从视频文件读取 -> 调用 from_frames 版本。
+    """
+    frames, info = read_video_tensor(video_path)
+    run_interpolation_pipeline_from_frames(
+        frames=frames,
+        fps_src=info.fps,
+        output_path=output_path,
+        cfg=cfg,
+        log_file=log_file,
+    )
 
 

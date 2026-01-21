@@ -25,6 +25,9 @@ interpolation_outputs/
 dataset/
 data/
 
+# --------------- 大文件清单 ---------------
+VBench-master/**/lvis_v1_minival_inserted_image_name.json
+
 # --------------- Python环境/缓存 ---------------
 venv/
 conda_env/
