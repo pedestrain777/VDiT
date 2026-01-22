@@ -1,113 +1,143 @@
-# [CVPR 2025]EDEN: Enhanced Diffusion for High-quality Large-motion Video Frame Interpolation
+# VDiT：生成 + 关键帧采样 + 自适应插帧（WAN → EDEN）
 
-<a href='https://arxiv.org/abs/2503.15831'><img src='https://img.shields.io/badge/Paper-Arxiv-red'></a>
-<a href='https://huggingface.co/zhZ524/EDEN/tree/main'><img src='https://img.shields.io/badge/HuggingFace-Model-orange'></a>
-<a href='https://bbldCVer.github.io/EDEN/'><img src='https://img.shields.io/badge/Project-Page-Green'></a>
+本仓库实现一条可扩展的视频处理 baseline pipeline：
 
-This repository is the official implementation of the following paper:
+> **生成器（默认 WAN 1.3B） → 生成视频 → 按 fps 均匀/随机取帧（关键帧序列，可保存中间视频） →
+> 关键帧区间信息计算 → 自适应决定每段插帧数量（greedy refine） → EDEN 插帧 → 输出 24fps 完整视频**
 
-> **EDEN: Enhanced Diffusion for High-quality Large-motion Video Frame Interpolation**
->
-> Zihao Zhang, Haoran Chen, Haoyu Zhao, Guansong Lu, Yanwei Fu, Hang Xu, Zuxuan Wu
+本项目已工程化支持：
 
-<div>
-    <h4 align="center">
-        <img src="./assets/comparison.jpg">
-    </h4>
-</div>
+* 从 **prompt** 直接生成并插帧输出（WAN → EDEN）
+* 从 **已有视频** 直接做插帧输出（跳过 WAN）
+* 保存中间结果（采样后视频、关键帧预览视频、最终输出）
+* xFormers 不可用时自动 fallback 到 PyTorch SDPA（保证可跑通）
+* 使用 PyAV 写 mp4（避免 torchvision+PyAV 版本不兼容问题）
 
+---
 
-## 🛠️ Pipeline
-<div align="center">
-  <img src="assets/pipeline.jpg"/>
-</div><br/>
+## 1. 项目结构
 
-We introduce EDEN, an enhanced diffusion-based method for high-quality video frame interpolation, addressing the challenging problem of video
-frame interpolation with large motion.
-
-Our framework employed a transformer-based tokenizer to compress intermediate frames into compact tokens, enhancing latent representations for the diffusion process. To address multi-scale motion, we incorporated a pyramid feature fusion module and introduced multi-resolution and multi-frame interval fine-tuning to adapt the model to varying motion magnitudes and resolutions. By utilizing a diffusion transformer with temporal attention and a start-end frame difference embedding, EDEN captured complex motion dynamics more effectively. Extensive experiments demonstrated that EDEN achieved state-of-the-art performances on large motion video benchmarks while also reducing computational costs.
-
-## :hammer: Quick Start
-
-### Clone the Repository
 ```
-git clone https://github.com/bbldcver/EDEN.git
-cd EDEN
+VDiT/
+  README.md
+  requirements.txt
+  scripts/
+    run_full_pipeline.py        # WAN->采样->插帧->输出（主入口）
+    run_pipeline.py             # 从已有视频插帧（旧入口，仍可用）
+  configs/
+    eval_eden.yaml              # EDEN/插帧评估相关配置（也可用于推理）
+  src/
+    vdit/
+      generators/               # 生成器插件（当前实现 wan）
+      pipeline/                 # full_pipeline + run_iframe + video_io
+      interpolators/            # EDEN 推理封装
+      scheduler/                # greedy_refine 等
+      modules/                  # attention（含 xformers fallback）
+  third_party/
+    wan/wan/                    # WAN 源码（保持 import wan）
+    raft/                       # RAFT 相关代码
+    vbench/                     # VBench（可选）
+  docs/legacy/                  # 历史说明文档（不影响主流程）
 ```
 
-### Prepare Environment
-```
-conda create -n eden python=3.10.13
-conda activate eden
+---
+
+## 2. 环境安装
+
+### 2.1 Python & PyTorch（建议）
+
+* Python 3.10
+* CUDA 对应的 PyTorch（你环境是 torch 2.4.x + cu124 也可以）
+
+### 2.2 安装依赖
+
+```bash
 pip install -r requirements.txt
 ```
 
-### Prepare Datasets
-Please download the datasets ([LAVIB](https://github.com/alexandrosstergiou/LAVIB?tab=readme-ov-file), [DAVIS](https://drive.google.com/file/d/1tcOoF5DkxJcX7_tGaKgv1B1pQnS7b-xL/view), [DAIN_HD](https://drive.google.com/file/d/1iHaLoR2g1-FLgr9MEv51NH_KQYMYz-FA/view), [SNU_FILM](https://myungsub.github.io/CAIN/)) and store them in the following format.
-```
-└──── <data directory>/
-    ├──── LAVIB/
-    |   ├──── annotations/
-    |   |   ├──── train.csv/
-    |   |   └──── ...
-    |   ├──── segments/
-    |   |   ├──── 10000_shot0_0_0_0/
-    |   |   └──── ...
-    |   └──── segments_downsampled/
-    |       ├──── 10000_shot0_0_0_0/
-    |       └──── ...
-    ├──── DAVIS/
-    |   ├──── bear/
-    |   ├──── bike-packing/
-    |   ├──── ...
-    |   └──── walking/
-    ├──── DAIN_HD/
-    |   └──── 544p/
-    |       ├──── Sintel_Alley2_1280x544_24_images/
-    |       ├──── Sintel_Market5_1280x544_24_images/
-    |       ├──── Sintel_Temple_1280x544_24_images/
-    |       └──── Sintel_Temple2_1280x544_24_images/
-    └──── SNU_FILM/
-        ├──── test/
-        |   ├──── GOPRO_test/
-        |   └──── YouTube_test/
-        ├──── test-easy.txt
-        ├──── ...
-        └──── test-medium.txt
+> 注意：本项目写视频使用 PyAV。若你的环境 PyAV 版本较新（例如 14.x），也能运行，因为我们已绕过 torchvision 写视频接口。
+
+---
+
+## 3. 模型与权重准备
+
+你需要准备以下权重（建议不要提交到 git，`.gitignore` 已忽略）：
+
+* WAN 1.3B checkpoint（示例路径：`/data/models/wan1.3b_checkpoint`）
+* RAFT 权重（示例路径：`/data/models/raft/raft-things.pth`）
+* EDEN 权重（由 `--eden_config` 内部配置指定）
+
+---
+
+## 4. 快速开始：完整 pipeline（WAN → 8fps 采样 → EDEN → 24fps）
+
+示例命令（生成中文 prompt，并把 WAN 输出按 8fps 均匀采样，然后插到 24fps）：
+
+```bash
+python scripts/run_full_pipeline.py \
+  --wan_ckpt_dir /data/models/wan1.3b_checkpoint \
+  --prompt "一只白猫和一只黑猫在打架" \
+  --eden_config configs/eval_eden.yaml \
+  --raft_ckpt /data/models/raft/raft-things.pth \
+  --wan_out_fps 8 \
+  --wan_frame_sample uniform \
+  --keyframe_mode all \
+  --target_fps 24 \
+  --output_path interpolation_outputs/final.mp4 \
+  --save_wan_video interpolation_outputs/wan_8fps.mp4
 ```
 
-### Download Checkpoints
-We provide pre-trained model weights, available for download [here](https://huggingface.co/zhZ524/EDEN/tree/main), and recommend saving them in the `data/models/eden_checkpoint` folder.
+参数解释：
 
-### Inference with EDEN
-After downloading the pretrained checkpoints, run the following command to interpolate images or videos with EDEN. The interpolation results are then saved to `interpolation_outputs` folder.
-```
-CUDA_VISIBLE_DEVICES=0 python inference.py --frame_0_path examples/frame_0.jpg --frame_1_path examples/frame_1.jpg --interpolated_results_dir interpolation_outputs
-```
+* `--wan_out_fps 8`：把 WAN 输出重采样为 8fps 的关键帧序列（保持时长不变）
+* `--wan_frame_sample uniform`：均匀采样（也支持 random/stratified_random）
+* `--keyframe_mode all`：**重要**：因为关键帧已经在 WAN 阶段产生，所以插帧阶段不再二次采样
+* `--target_fps 24`：最终输出帧率
 
-### Evaluation
-To evaluate eden, running the following command(change the evaluation dataset in `congfigs/eval_eden.yaml`): 
-```
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 accelerate launch eval.py
-```
+---
 
-### Training
-EDEN training consists of two stages: **eden_vae** and **eden_dit**. Use the following commands to train each stage:  
+## 5. 从已有视频开始插帧（跳过 WAN）
 
-- **eden_vae**: `CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 accelerate launch train_vae.py`  
-- **eden_dit**: `CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 accelerate launch train_dit.py`  
-
-Training parameters can be adjusted in `configs/train_vae.yaml` and `configs/train_dit.yaml`. Logs are saved in the `output` folder.
-
-## :fountain_pen: BibTex
-``` bibtex
-@inproceedings{zhang2025eden,
-  title={Enhanced Diffusion for High-quality Large-motion Video Frame Interpolation},
-  author={Zhang, Zihao and Chen, Haoran and Zhao, Haoyu and Lu, Guansong and Fu, Yanwei and Xu, Hang and Wu, Zuxuan},
-  booktitle={Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition},
-  year={2025}
-}
+```bash
+python scripts/run_full_pipeline.py \
+  --input_video path/to/input.mp4 \
+  --eden_config configs/eval_eden.yaml \
+  --raft_ckpt /data/models/raft/raft-things.pth \
+  --keyframe_mode all \
+  --target_fps 24 \
+  --output_path interpolation_outputs/out_24fps.mp4
 ```
 
-## Acknowledgement
-Our code is adapted from [SiT](https://github.com/willisma/SiT) and [LDMVFI](https://github.com/danier97/LDMVFI). Thanks to the team for their impressive work!
+---
+
+## 6. 保存中间视频（强烈推荐用于调试）
+
+* `--save_wan_video <path>`：保存进入插帧前的“采样后视频”（例如 wan_out_fps=8 的结果）
+* `--save_sampled_video <path>`：同上（建议逐步统一只保留该参数）
+* `--save_keyframes_video <path>`：保存插帧阶段选出的关键帧预览视频（当 keyframe_mode=uniform/random 时有用）
+
+---
+
+## 7. xFormers / 注意力加速说明
+
+如果你的环境 xformers 没有 CUDA 扩展，或输入 dtype 不支持（常见于 float32 推理），项目会自动 fallback 到 PyTorch 的 `scaled_dot_product_attention`，保证流程可跑通（但速度会慢一些）。
+
+---
+
+## 8. 如何新增生成器（例如未来接入 CogVideo）
+
+本项目对生成器做了插件化抽象：
+
+* 接口：`vdit.generators.base.VideoGenerator`
+* 注册：`@register_generator("name")`
+* 创建：`create_generator(name, **kwargs)`
+
+新增 CogVideo 时，只需要：
+
+1. 新增文件 `src/vdit/generators/cogvideo.py`
+2. 实现 `generate(prompt) -> (frames[T,3,H,W], fps)`
+3. 注册 `@register_generator("cogvideo")`
+4. 在脚本中增加对应参数并传入 `generator_name="cogvideo"`
+
+插帧 pipeline 与后处理无需改动。
+
