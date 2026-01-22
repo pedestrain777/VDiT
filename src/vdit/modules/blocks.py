@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 from functools import partial
-from src.modules.attention import SelfAttention, CrossAttention, TemporalAttention
+from vdit.modules.attention import SelfAttention, CrossAttention, TemporalAttention
 
 
 def modulate(x, shift, scale):

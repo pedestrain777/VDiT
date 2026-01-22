@@ -24,9 +24,9 @@ from typing import Optional, Tuple
 
 import torch
 
-from src.flow.raft_estimator import RaftEstimator
-from src.metrics.eden_diff import eden_diff
-from src.metrics.rgb_topk import topk_rgb_diff
+from vdit.flow.raft_estimator import RaftEstimator
+from vdit.metrics.eden_diff import eden_diff
+from vdit.metrics.rgb_topk import topk_rgb_diff
 
 
 @dataclass(frozen=True)

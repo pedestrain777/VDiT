@@ -19,10 +19,10 @@ from typing import Any, Dict, Optional
 import torch
 import yaml
 
-from src.models import load_model
-from src.transport import Sampler, create_transport
-from src.utils import InputPadder
-from src.utils.encode_transfer import pack_enc_out, unpack_enc_out
+from vdit.models import load_model
+from vdit.transport import Sampler, create_transport
+from vdit.utils import InputPadder
+from vdit.utils.encode_transfer import pack_enc_out, unpack_enc_out
 
 
 @dataclass(frozen=True)

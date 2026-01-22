@@ -1,7 +1,21 @@
-from src.models import load_model
-from src.utils import InputPadder
-from src.utils.encode_transfer import pack_enc_out, unpack_enc_out
-from src.transport import create_transport, Sampler
+from pathlib import Path
+import sys
+
+_HERE = Path(__file__).resolve()
+for _parent in [_HERE] + list(_HERE.parents):
+    _src_dir = _parent / "src"
+    if _src_dir.is_dir():
+        _root = _src_dir.parent
+        if str(_root) not in sys.path:
+            sys.path.insert(0, str(_root))
+        if str(_src_dir) not in sys.path:
+            sys.path.insert(0, str(_src_dir))
+        break
+
+from vdit.models import load_model
+from vdit.utils import InputPadder
+from vdit.utils.encode_transfer import pack_enc_out, unpack_enc_out
+from vdit.transport import create_transport, Sampler
 import torchvision
 import torch
 import argparse
@@ -9,7 +23,7 @@ import yaml
 import os
 import numpy as np
 
-from src.scheduler.greedy_refine import greedy_refine
+from vdit.scheduler.greedy_refine import greedy_refine
 
 
 def interpolate(frame0, frame1, use_split_gpu=False):
@@ -396,4 +410,3 @@ elif frame_0_path and frame_1_path:
     print(f"Saved interpolated image in {interpolated_frame_path}.")
 else:
     assert "There are no images or videos to be interpolated!"
-

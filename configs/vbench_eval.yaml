@@ -1,7 +1,7 @@
 exp_name:  baseline_25_0
 output_root: results/vbench
 
-prompt_file: VBench-master/prompts/metadata/object_class.json
+prompt_file: third_party/vbench/VBench-master/prompts/metadata/object_class.json
 negative_prompt_file: null
 
 models:
@@ -32,4 +32,3 @@ vbench_metrics:
   - overall
   - quality
   - consistency
-

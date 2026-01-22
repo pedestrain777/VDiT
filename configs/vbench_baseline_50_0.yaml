@@ -1,7 +1,7 @@
 exp_name: baseline_50_0
 output_root: results/vbench
 
-prompt_file: VBench-master/prompts/all_dimension.txt
+prompt_file: third_party/vbench/VBench-master/prompts/all_dimension.txt
 negative_prompt_file: null
 
 models:
@@ -51,4 +51,3 @@ vbench_metrics:
   # - temporal_style
   # - appearance_style
   # - overall_consistency
-

@@ -16,11 +16,17 @@ import os
 import sys
 from pathlib import Path
 
-# 允许直接 `python scripts/run_pipeline.py ...` 运行时也能 import `src.*`
-# （此时 sys.path[0] 是 scripts/，不会自动包含项目根目录）
-_ROOT = Path(__file__).resolve().parents[1]
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
+# 允许直接 `python scripts/run_pipeline.py ...` 时 import vdit.*
+_HERE = Path(__file__).resolve()
+for _parent in [_HERE] + list(_HERE.parents):
+    _src_dir = _parent / "src"
+    if _src_dir.is_dir():
+        _root = _src_dir.parent
+        if str(_root) not in sys.path:
+            sys.path.insert(0, str(_root))
+        if str(_src_dir) not in sys.path:
+            sys.path.insert(0, str(_src_dir))
+        break
 
 
 def main() -> None:
@@ -54,7 +60,7 @@ def main() -> None:
     os.makedirs(os.path.dirname(args.log_file) or ".", exist_ok=True)
 
     # 延迟导入：避免 `--help` 也触发重依赖（如 lpips/xformers）导入失败
-    from src.pipeline.run_iframe import PipelineConfig, run_interpolation_pipeline
+    from vdit.pipeline.run_iframe import PipelineConfig, run_interpolation_pipeline
 
     cfg = PipelineConfig(
         eden_config=args.eden_config,
@@ -79,5 +85,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
 

@@ -8,10 +8,24 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from PIL import Image
 
-from src.models import load_model
-from src.transport import Sampler, create_transport
-from src.utils import InputPadder
-from src.utils.encode_transfer import unpack_enc_out
+from pathlib import Path
+import sys
+
+_HERE = Path(__file__).resolve()
+for _parent in [_HERE] + list(_HERE.parents):
+    _src_dir = _parent / "src"
+    if _src_dir.is_dir():
+        _root = _src_dir.parent
+        if str(_root) not in sys.path:
+            sys.path.insert(0, str(_root))
+        if str(_src_dir) not in sys.path:
+            sys.path.insert(0, str(_src_dir))
+        break
+
+from vdit.models import load_model
+from vdit.transport import Sampler, create_transport
+from vdit.utils import InputPadder
+from vdit.utils.encode_transfer import unpack_enc_out
 
 
 class InterpolateRequest(BaseModel):
@@ -104,4 +118,3 @@ def interpolate(req: InterpolateRequest):
     generated = padder.unpad(generated).clamp(0.0, 1.0)
     frame_b64 = tensor_to_b64_png(generated.cpu())
     return InterpolateResponse(frame=frame_b64)
-

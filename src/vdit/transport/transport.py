@@ -2,8 +2,8 @@
 import torch as th
 import numpy as np
 import enum
-from src.transport import path
-from src.transport.integrators import ode, sde
+from vdit.transport import path
+from vdit.transport.integrators import ode, sde
 
 
 def mean_flat(x):

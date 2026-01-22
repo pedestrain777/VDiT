@@ -1,7 +1,21 @@
-from src.models import load_model
-from src.datasets import load_dataset
-from src.utils import CalMetrics, InputPadder
-from src.transport import create_transport, Sampler
+from pathlib import Path
+import sys
+
+_HERE = Path(__file__).resolve()
+for _parent in [_HERE] + list(_HERE.parents):
+    _src_dir = _parent / "src"
+    if _src_dir.is_dir():
+        _root = _src_dir.parent
+        if str(_root) not in sys.path:
+            sys.path.insert(0, str(_root))
+        if str(_src_dir) not in sys.path:
+            sys.path.insert(0, str(_src_dir))
+        break
+
+from vdit.models import load_model
+from vdit.datasets import load_dataset
+from vdit.utils import CalMetrics, InputPadder
+from vdit.transport import create_transport, Sampler
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
@@ -138,4 +152,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

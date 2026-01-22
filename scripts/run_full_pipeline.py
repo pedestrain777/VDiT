@@ -7,10 +7,17 @@ import os
 import sys
 from pathlib import Path
 
-# 允许直接 `python scripts/run_full_pipeline.py ...` 时 import src.*
-_ROOT = Path(__file__).resolve().parents[1]
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
+# 允许直接 `python scripts/run_full_pipeline.py ...` 时 import vdit.*
+_HERE = Path(__file__).resolve()
+for _parent in [_HERE] + list(_HERE.parents):
+    _src_dir = _parent / "src"
+    if _src_dir.is_dir():
+        _root = _src_dir.parent
+        if str(_root) not in sys.path:
+            sys.path.insert(0, str(_root))
+        if str(_src_dir) not in sys.path:
+            sys.path.insert(0, str(_src_dir))
+        break
 
 
 def main() -> None:
@@ -44,6 +51,7 @@ def main() -> None:
         choices=["uniform", "random", "stratified_random"],
     )
     p.add_argument("--wan_frame_sample_seed", type=int, default=0)
+    p.add_argument("--generator", type=str, default="wan", help="generator backend name (default: wan)")
 
     # -------- 插帧参数（你原来的 pipeline 参数）--------
     p.add_argument("--eden_config", type=str, required=True)
@@ -97,9 +105,9 @@ def main() -> None:
         os.makedirs(os.path.dirname(args.save_keyframes_video) or ".", exist_ok=True)
 
     # 延迟导入（与 run_pipeline.py 一致）
-    from src.generators.wan_t2v import WanGenerateConfig
-    from src.pipeline.full_pipeline import FullPipelineConfig, run_full_pipeline
-    from src.pipeline.run_iframe import PipelineConfig
+    from vdit.generators.wan_t2v import WanGenerateConfig
+    from vdit.pipeline.full_pipeline import FullPipelineConfig, run_full_pipeline
+    from vdit.pipeline.run_iframe import PipelineConfig
 
     # WAN 配置（仅在需要 WAN 生成时使用）
     wan_cfg = WanGenerateConfig(
@@ -132,7 +140,7 @@ def main() -> None:
         topk_ratio=args.topk_ratio,
     )
 
-    full_cfg = FullPipelineConfig(wan=wan_cfg, iframe=iframe_cfg)
+    full_cfg = FullPipelineConfig(wan=wan_cfg, iframe=iframe_cfg, generator_name=args.generator)
 
     run_full_pipeline(
         prompt=args.prompt,
@@ -150,4 +158,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

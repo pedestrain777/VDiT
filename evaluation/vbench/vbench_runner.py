@@ -131,7 +131,7 @@ def main() -> None:
         return
 
     project_root = cfg_path.parent.parent
-    vbench_repo = project_root / "VBench-master"
+    vbench_repo = project_root / "third_party" / "vbench" / "VBench-master"
     if not vbench_repo.exists():
         raise FileNotFoundError(f"VBench repository not found at {vbench_repo}")
 
@@ -252,4 +252,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

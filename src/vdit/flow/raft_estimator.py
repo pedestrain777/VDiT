@@ -18,7 +18,7 @@ from typing import Optional, Tuple
 import torch
 import os
 
-from src.flow.warp import bilinear_sample, coords_grid
+from vdit.flow.warp import bilinear_sample, coords_grid
 
 # third_party/raft
 from third_party.raft.core.raft import RAFT  # type: ignore

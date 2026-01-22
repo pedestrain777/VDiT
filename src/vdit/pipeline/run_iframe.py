@@ -6,12 +6,12 @@ from typing import Literal, Optional
 
 import torch
 
-from src.interpolators.eden_local import EdenInterpolator
-from src.metrics.fuse import IntervalScorer, ScorerWeights
-from src.flow.raft_estimator import RaftEstimator
-from src.scheduler.greedy_refine import greedy_refine
-from src.pipeline.keyframes import random_keyframes, uniform_keyframes
-from src.pipeline.video_io import read_video_tensor, write_video_tensor
+from vdit.interpolators.eden_local import EdenInterpolator
+from vdit.metrics.fuse import IntervalScorer, ScorerWeights
+from vdit.flow.raft_estimator import RaftEstimator
+from vdit.scheduler.greedy_refine import greedy_refine
+from vdit.pipeline.keyframes import random_keyframes, uniform_keyframes
+from vdit.pipeline.video_io import read_video_tensor, write_video_tensor
 
 
 @dataclass(frozen=True)

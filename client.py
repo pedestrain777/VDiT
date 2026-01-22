@@ -9,7 +9,21 @@ import torch
 import torchvision
 from PIL import Image
 
-from src.scheduler.greedy_refine import greedy_refine
+from pathlib import Path
+import sys
+
+_HERE = Path(__file__).resolve()
+for _parent in [_HERE] + list(_HERE.parents):
+    _src_dir = _parent / "src"
+    if _src_dir.is_dir():
+        _root = _src_dir.parent
+        if str(_root) not in sys.path:
+            sys.path.insert(0, str(_root))
+        if str(_src_dir) not in sys.path:
+            sys.path.insert(0, str(_src_dir))
+        break
+
+from vdit.scheduler.greedy_refine import greedy_refine
 
 
 def compute_motion_scores(video_frames, topk_ratio=0.1):
@@ -349,4 +363,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

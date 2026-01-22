@@ -4,9 +4,23 @@
 """
 import torch
 import torchvision
-from src.models import load_model
-from src.utils import InputPadder
-from src.transport import create_transport, Sampler
+from pathlib import Path
+import sys
+
+_HERE = Path(__file__).resolve()
+for _parent in [_HERE] + list(_HERE.parents):
+    _src_dir = _parent / "src"
+    if _src_dir.is_dir():
+        _root = _src_dir.parent
+        if str(_root) not in sys.path:
+            sys.path.insert(0, str(_root))
+        if str(_src_dir) not in sys.path:
+            sys.path.insert(0, str(_src_dir))
+        break
+
+from vdit.models import load_model
+from vdit.utils import InputPadder
+from vdit.transport import create_transport, Sampler
 import yaml
 import os
 
@@ -150,4 +164,3 @@ if __name__ == "__main__":
         print(f"\n✗ 测试出错: {e}")
         import traceback
         traceback.print_exc()
-

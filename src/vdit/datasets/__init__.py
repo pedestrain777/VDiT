@@ -1,7 +1,7 @@
-from src.datasets.LAVIB import LAVIBDataset
-from src.datasets.DAVIS import DAVISDataset
-from src.datasets.DAIN_HD import HDDataset
-from src.datasets.SNU_FILM import SNUFILMDataset
+from vdit.datasets.LAVIB import LAVIBDataset
+from vdit.datasets.DAVIS import DAVISDataset
+from vdit.datasets.DAIN_HD import HDDataset
+from vdit.datasets.SNU_FILM import SNUFILMDataset
 
 
 def load_dataset(dataset_name, **dataset_args):

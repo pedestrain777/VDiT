@@ -7,9 +7,10 @@ from typing import Optional
 
 import torch
 
-from src.generators.wan_t2v import WanGenerateConfig, generate_wan_frames
-from src.pipeline.run_iframe import PipelineConfig, run_interpolation_pipeline_from_frames
-from src.pipeline.video_io import read_video_tensor, write_video_tensor
+from vdit.generators.base import create_generator
+from vdit.generators.wan_t2v import WanGenerateConfig
+from vdit.pipeline.run_iframe import PipelineConfig, run_interpolation_pipeline_from_frames
+from vdit.pipeline.video_io import read_video_tensor, write_video_tensor
 
 
 @dataclass(frozen=True)
@@ -18,6 +19,8 @@ class FullPipelineConfig:
     wan: WanGenerateConfig
     # 插帧配置（你原来的 PipelineConfig）
     iframe: PipelineConfig
+    # 生成器名称（插件化）
+    generator_name: str = "wan"
 
 
 @torch.no_grad()
@@ -61,11 +64,8 @@ def run_full_pipeline(
         # 从 WAN 生成开始（原始流程）
         if prompt is None or wan_ckpt_dir is None:
             raise ValueError("Must provide either (input_video) or (prompt + wan_ckpt_dir)")
-        frames, fps_src = generate_wan_frames(
-            prompt=prompt,
-            ckpt_dir=wan_ckpt_dir,
-            cfg=cfg.wan,
-        )
+        generator = create_generator(cfg.generator_name, ckpt_dir=wan_ckpt_dir, cfg=cfg.wan)
+        frames, fps_src = generator.generate(prompt)
 
     sampled_video_path = save_sampled_video_path or save_wan_video_path
     if sampled_video_path:
@@ -80,4 +80,3 @@ def run_full_pipeline(
         log_file=log_file,
         save_keyframes_video_path=save_keyframes_video_path,
     )
-

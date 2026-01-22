@@ -1,14 +1,24 @@
-# src/generators/wan_t2v.py
+# src/vdit/generators/wan_t2v.py
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Literal, Optional, Tuple
+import sys
+from pathlib import Path
 
 import torch
 
-# 依赖你把 wan/ 放到了项目根目录（DiT/../wan 或 DiT/wan；推荐放到项目根同级/根内以保持 `import wan` 可用）
-import wan  # type: ignore
+from vdit.generators.base import register_generator
+
+try:
+    import wan  # type: ignore
+except Exception:
+    _ROOT = Path(__file__).resolve().parents[3]
+    _WAN_ROOT = _ROOT / "third_party" / "wan"
+    if _WAN_ROOT.exists():
+        sys.path.insert(0, str(_WAN_ROOT))
+    import wan  # type: ignore
 
 from wan.configs import SIZE_CONFIGS, WAN_CONFIGS  # type: ignore
 from wan.utils.frame_sampling import resample_video_tensor  # type: ignore
@@ -129,3 +139,12 @@ def generate_wan_frames(
     return frames, float(fps_tgt)
 
 
+@register_generator("wan")
+class WanGenerator:
+    def __init__(self, ckpt_dir: str, cfg: WanGenerateConfig):
+        self.ckpt_dir = ckpt_dir
+        self.cfg = cfg
+
+    @torch.no_grad()
+    def generate(self, prompt: str) -> Tuple[torch.Tensor, float]:
+        return generate_wan_frames(prompt=prompt, ckpt_dir=self.ckpt_dir, cfg=self.cfg)
