@@ -7,6 +7,7 @@ from typing import Literal, Optional, Tuple
 import sys
 from pathlib import Path
 
+import math
 import torch
 
 from vdit.generators.base import register_generator
@@ -24,6 +25,32 @@ from wan.configs import SIZE_CONFIGS, WAN_CONFIGS  # type: ignore
 from wan.utils.frame_sampling import resample_video_tensor  # type: ignore
 
 FrameSampleMode = Literal["uniform", "random", "stratified_random"]
+
+
+def auto_keyframe_topk(
+    frame_num_full: int,
+    fps_full: float,
+    fps_key: float,
+    stride_t: int,
+    min_k: int = 2,
+    max_k: Optional[int] = None,
+) -> int:
+    """
+    根据目标关键帧 fps 自动估计 latent 关键帧数量 K。
+    """
+    if fps_key <= 0:
+        raise ValueError(f"fps_key must be > 0, got {fps_key}")
+    if frame_num_full <= 1:
+        return max(min_k, 1)
+
+    t_key = int(round(frame_num_full * (fps_key / float(fps_full))))
+    t_key = max(2, t_key)
+
+    k = int(round((t_key - 1) / float(stride_t))) + 1
+    k = max(min_k, k)
+    if max_k is not None:
+        k = min(max_k, k)
+    return k
 
 
 @dataclass(frozen=True)
@@ -59,6 +86,7 @@ class WanGenerateConfig:
     save_debug_pt: bool = True
     profile_timing: bool = True
     keyframe_out_fps: Optional[float] = None
+    keyframe_target_fps: Optional[float] = None
 
     # -------- 设备相关 --------
     device_id: int = 0  # 与 wan-main/generate.py 的 device_id 对齐（int）
@@ -115,6 +143,22 @@ def generate_wan_frames(
         t5_cpu=cfg.t5_cpu,
     )
 
+    keyframe_topk = cfg.keyframe_topk
+    keyframe_out_fps = cfg.keyframe_out_fps
+    if cfg.keyframe_by_entropy and cfg.keyframe_target_fps is not None:
+        stride_t = int(model.vae_stride[0]) if hasattr(model, "vae_stride") else 4
+        max_k = (cfg.frame_num - 1) // stride_t + 1
+        keyframe_topk = auto_keyframe_topk(
+            frame_num_full=cfg.frame_num,
+            fps_full=float(fps_src),
+            fps_key=float(cfg.keyframe_target_fps),
+            stride_t=stride_t,
+            min_k=2,
+            max_k=max_k,
+        )
+        if keyframe_out_fps is None:
+            keyframe_out_fps = float(cfg.keyframe_target_fps)
+
     # 生成 WAN 原生视频张量：[C,T,H,W]
     video = model.generate(
         prompt,
@@ -131,7 +175,7 @@ def generate_wan_frames(
         entropy_mode=cfg.entropy_mode,
         entropy_ema_alpha=cfg.entropy_ema_alpha,
         entropy_block_idx=cfg.entropy_block_idx,
-        keyframe_topk=cfg.keyframe_topk,
+        keyframe_topk=keyframe_topk,
         keyframe_cover=cfg.keyframe_cover,
         use_nonkey_context=cfg.use_nonkey_context,
         debug_dir=cfg.debug_dir,
@@ -144,8 +188,8 @@ def generate_wan_frames(
         t_full = int(cfg.frame_num)
         if t_full > 0:
             fps_tgt = fps_src * (t_out / float(t_full))
-        if cfg.keyframe_out_fps is not None:
-            fps_tgt = float(cfg.keyframe_out_fps)
+        if keyframe_out_fps is not None:
+            fps_tgt = float(keyframe_out_fps)
 
     # 可选：按 out_fps 做“均匀/随机取帧”（保持时长不变）
     if cfg.out_fps is not None and not cfg.keyframe_by_entropy:

@@ -70,6 +70,7 @@ def main() -> None:
     p.add_argument("--wan_profile_timing", action="store_true")
     p.add_argument("--wan_no_profile_timing", action="store_true")
     p.add_argument("--wan_keyframe_out_fps", type=float, default=None)
+    p.add_argument("--wan_keyframe_target_fps", type=float, default=None)
 
     # -------- 插帧参数（你原来的 pipeline 参数）--------
     p.add_argument("--eden_config", type=str, required=True)
@@ -179,6 +180,7 @@ def main() -> None:
         save_debug_pt=save_debug_pt,
         profile_timing=profile_timing,
         keyframe_out_fps=args.wan_keyframe_out_fps,
+        keyframe_target_fps=args.wan_keyframe_target_fps,
         device_id=0,
         t5_cpu=False,
     )

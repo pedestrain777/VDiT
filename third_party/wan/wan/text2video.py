@@ -435,6 +435,21 @@ class WanT2V:
                             map2d,
                             os.path.join(debug_dir,
                                          f"entropy_token_map_step_{step_i:02d}.pt"))
+                        from .utils.vis_entropy import save_block_heatmap_png
+
+                        f_g, h_g, w_g = map(
+                            int, collector.last_grid_sizes[0].tolist())
+                        map3d = map2d.reshape(f_g, h_g, w_g)
+
+                        imgs_dir = os.path.join(
+                            debug_dir, "imgs", f"step{step_i:02d}",
+                            f"block{entropy_block_idx:02d}")
+                        os.makedirs(imgs_dir, exist_ok=True)
+                        for fi in range(f_g):
+                            out_png = os.path.join(
+                                imgs_dir,
+                                f"restored_entropy_f{fi:02d}_cond.png")
+                            save_block_heatmap_png(map3d[fi], out_png, dpi=300)
 
                 if keyframe_by_entropy and step_i == entropy_steps - 1:
                     ent_final = collector.final()[0]
