@@ -312,6 +312,25 @@ class WanT2V:
             emb = emb.mean(dim=(3, 4))
             return emb.permute(0, 2, 1).contiguous()
 
+        def reset_multistep_state(scheduler):
+            if hasattr(scheduler, "config") and hasattr(scheduler.config, "solver_order"):
+                solver_order = int(scheduler.config.solver_order)
+            elif hasattr(scheduler, "model_outputs"):
+                solver_order = len(scheduler.model_outputs)
+            elif hasattr(scheduler, "timestep_list"):
+                solver_order = len(scheduler.timestep_list)
+            else:
+                solver_order = None
+
+            if hasattr(scheduler, "model_outputs") and solver_order is not None:
+                scheduler.model_outputs = [None] * solver_order
+            if hasattr(scheduler, "timestep_list") and solver_order is not None:
+                scheduler.timestep_list = [None] * solver_order
+            if hasattr(scheduler, "lower_order_nums"):
+                scheduler.lower_order_nums = 0
+            if hasattr(scheduler, "last_sample"):
+                scheduler.last_sample = None
+
         from .utils.entropy_collector import EntropyCollector
 
         collector = EntropyCollector(
@@ -435,6 +454,7 @@ class WanT2V:
 
                     latents = [latents[0][:, key_idx, :, :].contiguous()]
                     seq_len_curr = calc_seq_len(latents[0].shape[1])
+                    reset_multistep_state(sample_scheduler)
                     t_entropy_end = time.time()
 
                     if debug_dir is not None and self.rank == 0:

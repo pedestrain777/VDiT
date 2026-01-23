@@ -53,6 +53,24 @@ def main() -> None:
     p.add_argument("--wan_frame_sample_seed", type=int, default=0)
     p.add_argument("--generator", type=str, default="wan", help="generator backend name (default: wan)")
 
+    # -------- WAN: entropy keyframe（真正裁剪 latent 时间维）--------
+    p.add_argument("--wan_keyframe_by_entropy", action="store_true")
+    p.add_argument("--wan_entropy_steps", type=int, default=5)
+    p.add_argument("--wan_entropy_mode", type=str, default="mean", choices=["last", "mean", "ema"])
+    p.add_argument("--wan_entropy_ema_alpha", type=float, default=0.6)
+    p.add_argument("--wan_entropy_block_idx", type=int, default=-1)
+    p.add_argument("--wan_keyframe_topk", type=int, default=16)
+    p.add_argument("--wan_keyframe_cover", action="store_true")
+    p.add_argument("--wan_no_keyframe_cover", action="store_true")
+    p.add_argument("--wan_use_nonkey_context", action="store_true")
+    p.add_argument("--wan_no_nonkey_context", action="store_true")
+    p.add_argument("--wan_entropy_debug_dir", type=str, default=None)
+    p.add_argument("--wan_save_debug_pt", action="store_true")
+    p.add_argument("--wan_no_save_debug_pt", action="store_true")
+    p.add_argument("--wan_profile_timing", action="store_true")
+    p.add_argument("--wan_no_profile_timing", action="store_true")
+    p.add_argument("--wan_keyframe_out_fps", type=float, default=None)
+
     # -------- 插帧参数（你原来的 pipeline 参数）--------
     p.add_argument("--eden_config", type=str, required=True)
     p.add_argument("--output_path", type=str, default="interpolation_outputs/final.mp4")
@@ -103,6 +121,8 @@ def main() -> None:
         os.makedirs(os.path.dirname(args.save_sampled_video) or ".", exist_ok=True)
     if args.save_keyframes_video:
         os.makedirs(os.path.dirname(args.save_keyframes_video) or ".", exist_ok=True)
+    if args.wan_entropy_debug_dir:
+        os.makedirs(args.wan_entropy_debug_dir, exist_ok=True)
 
     # 延迟导入（与 run_pipeline.py 一致）
     from vdit.generators.wan_t2v import WanGenerateConfig
@@ -110,6 +130,30 @@ def main() -> None:
     from vdit.pipeline.run_iframe import PipelineConfig
 
     # WAN 配置（仅在需要 WAN 生成时使用）
+    keyframe_cover = True
+    if args.wan_no_keyframe_cover:
+        keyframe_cover = False
+    elif args.wan_keyframe_cover:
+        keyframe_cover = True
+
+    use_nonkey_context = True
+    if args.wan_no_nonkey_context:
+        use_nonkey_context = False
+    elif args.wan_use_nonkey_context:
+        use_nonkey_context = True
+
+    save_debug_pt = True
+    if args.wan_no_save_debug_pt:
+        save_debug_pt = False
+    elif args.wan_save_debug_pt:
+        save_debug_pt = True
+
+    profile_timing = True
+    if args.wan_no_profile_timing:
+        profile_timing = False
+    elif args.wan_profile_timing:
+        profile_timing = True
+
     wan_cfg = WanGenerateConfig(
         task=args.wan_task,
         size=args.wan_size,
@@ -123,6 +167,18 @@ def main() -> None:
         out_fps=args.wan_out_fps,
         frame_sample=args.wan_frame_sample,
         frame_sample_seed=args.wan_frame_sample_seed,
+        keyframe_by_entropy=args.wan_keyframe_by_entropy,
+        entropy_steps=args.wan_entropy_steps,
+        entropy_mode=args.wan_entropy_mode,
+        entropy_ema_alpha=args.wan_entropy_ema_alpha,
+        entropy_block_idx=args.wan_entropy_block_idx,
+        keyframe_topk=args.wan_keyframe_topk,
+        keyframe_cover=keyframe_cover,
+        use_nonkey_context=use_nonkey_context,
+        debug_dir=args.wan_entropy_debug_dir,
+        save_debug_pt=save_debug_pt,
+        profile_timing=profile_timing,
+        keyframe_out_fps=args.wan_keyframe_out_fps,
         device_id=0,
         t5_cpu=False,
     )

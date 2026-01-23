@@ -46,6 +46,20 @@ class WanGenerateConfig:
     frame_sample: FrameSampleMode = "uniform"
     frame_sample_seed: int = 0
 
+    # -------- Keyframe-by-entropy（真正裁剪 latent 时间维）--------
+    keyframe_by_entropy: bool = False
+    entropy_steps: int = 5
+    entropy_mode: str = "mean"  # "last" | "mean" | "ema"
+    entropy_ema_alpha: float = 0.6
+    entropy_block_idx: int = -1  # -1 = last block
+    keyframe_topk: int = 16
+    keyframe_cover: bool = True
+    use_nonkey_context: bool = True
+    debug_dir: Optional[str] = None
+    save_debug_pt: bool = True
+    profile_timing: bool = True
+    keyframe_out_fps: Optional[float] = None
+
     # -------- 设备相关 --------
     device_id: int = 0  # 与 wan-main/generate.py 的 device_id 对齐（int）
     t5_cpu: bool = False  # 如显存很紧，可 True 试试（会慢）
@@ -112,10 +126,29 @@ def generate_wan_frames(
         guide_scale=cfg.guide_scale,
         seed=cfg.seed,
         offload_model=cfg.offload_model,
+        keyframe_by_entropy=cfg.keyframe_by_entropy,
+        entropy_steps=cfg.entropy_steps,
+        entropy_mode=cfg.entropy_mode,
+        entropy_ema_alpha=cfg.entropy_ema_alpha,
+        entropy_block_idx=cfg.entropy_block_idx,
+        keyframe_topk=cfg.keyframe_topk,
+        keyframe_cover=cfg.keyframe_cover,
+        use_nonkey_context=cfg.use_nonkey_context,
+        debug_dir=cfg.debug_dir,
+        save_debug_pt=cfg.save_debug_pt,
+        profile_timing=cfg.profile_timing,
     )
 
+    if cfg.keyframe_by_entropy:
+        t_out = int(video.shape[1])
+        t_full = int(cfg.frame_num)
+        if t_full > 0:
+            fps_tgt = fps_src * (t_out / float(t_full))
+        if cfg.keyframe_out_fps is not None:
+            fps_tgt = float(cfg.keyframe_out_fps)
+
     # 可选：按 out_fps 做“均匀/随机取帧”（保持时长不变）
-    if cfg.out_fps is not None:
+    if cfg.out_fps is not None and not cfg.keyframe_by_entropy:
         fps_tgt = float(cfg.out_fps)
         if fps_tgt > 0 and abs(fps_tgt - fps_src) > 1e-6:
             video, _idx = resample_video_tensor(

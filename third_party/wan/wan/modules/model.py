@@ -300,9 +300,9 @@ class WanAttentionBlock(nn.Module):
         seq_lens,
         grid_sizes,
         freqs,
-        entropy_collector=None,
         context,
         context_lens,
+        entropy_collector=None,
     ):
         r"""
         Args:
