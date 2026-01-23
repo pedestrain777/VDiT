@@ -127,7 +127,7 @@ class WanSelfAttention(nn.Module):
         self.norm_q = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
         self.norm_k = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
 
-    def forward(self, x, seq_lens, grid_sizes, freqs):
+    def forward(self, x, seq_lens, grid_sizes, freqs, entropy_collector=None):
         r"""
         Args:
             x(Tensor): Shape [B, L, num_heads, C / num_heads]
@@ -146,9 +146,27 @@ class WanSelfAttention(nn.Module):
 
         q, k, v = qkv_fn(x)
 
+        q_r = rope_apply(q, grid_sizes, freqs)
+        k_r = rope_apply(k, grid_sizes, freqs)
+
+        if entropy_collector is not None and getattr(entropy_collector,
+                                                     "enabled", False):
+            from ..utils.attn_entropy import (temporal_attn_entropy_from_qk,
+                                              token_entropy_to_frame)
+
+            ent_tok = temporal_attn_entropy_from_qk(
+                q_r, k_r, grid_sizes=grid_sizes, seq_lens=seq_lens)
+            ent_frm = token_entropy_to_frame(
+                ent_tok, grid_sizes=grid_sizes, seq_lens=seq_lens)
+            entropy_collector.add(
+                ent_frm,
+                ent_token=ent_tok,
+                grid_sizes=grid_sizes,
+                seq_lens=seq_lens)
+
         x = attention(
-            q=rope_apply(q, grid_sizes, freqs),
-            k=rope_apply(k, grid_sizes, freqs),
+            q=q_r,
+            k=k_r,
             v=v,
             k_lens=seq_lens,
             window_size=self.window_size)
@@ -282,6 +300,7 @@ class WanAttentionBlock(nn.Module):
         seq_lens,
         grid_sizes,
         freqs,
+        entropy_collector=None,
         context,
         context_lens,
     ):
@@ -300,8 +319,11 @@ class WanAttentionBlock(nn.Module):
 
         # self-attention
         y = self.self_attn(
-            self.norm1(x).float() * (1 + e[1]) + e[0], seq_lens, grid_sizes,
-            freqs)
+            self.norm1(x).float() * (1 + e[1]) + e[0],
+            seq_lens,
+            grid_sizes,
+            freqs,
+            entropy_collector=entropy_collector)
         with amp.autocast(dtype=torch.float32):
             x = x + y * e[2]
 
@@ -498,6 +520,8 @@ class WanModel(ModelMixin, ConfigMixin):
         seq_len,
         clip_fea=None,
         y=None,
+        entropy_collector=None,
+        extra_context=None,
     ):
         r"""
         Forward pass through the diffusion model
@@ -562,6 +586,12 @@ class WanModel(ModelMixin, ConfigMixin):
             context_clip = self.img_emb(clip_fea)  # bs x 257 (x2) x dim
             context = torch.concat([context_clip, context], dim=1)
 
+        if extra_context is not None:
+            extra_context = extra_context.to(context.dtype)
+            if extra_context.device != context.device:
+                extra_context = extra_context.to(context.device)
+            context = torch.cat([extra_context, context], dim=1)
+
         # arguments
         kwargs = dict(
             e=e0,
@@ -571,8 +601,21 @@ class WanModel(ModelMixin, ConfigMixin):
             context=context,
             context_lens=context_lens)
 
-        for block in self.blocks:
-            x = block(x, **kwargs)
+        use_collector = entropy_collector if (
+            entropy_collector is not None
+            and getattr(entropy_collector, "enabled", False)) else None
+        if use_collector is not None and use_collector.block_idx is not None:
+            target_idx = use_collector.block_idx
+            if target_idx < 0:
+                target_idx = len(self.blocks) - 1
+        else:
+            target_idx = None
+
+        for idx, block in enumerate(self.blocks):
+            block_collector = None
+            if use_collector is not None and target_idx is not None:
+                block_collector = use_collector if idx == target_idx else None
+            x = block(x, **kwargs, entropy_collector=block_collector)
 
         # head
         x = self.head(x, e)

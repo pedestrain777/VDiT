@@ -100,6 +100,8 @@ def usp_dit_forward(
     vace_context_scale=1.0,
     clip_fea=None,
     y=None,
+    entropy_collector=None,
+    extra_context=None,
 ):
     """
     x:              A list of videos each with shape [C, T, H, W].
@@ -147,6 +149,12 @@ def usp_dit_forward(
         context_clip = self.img_emb(clip_fea)  # bs x 257 x dim
         context = torch.concat([context_clip, context], dim=1)
 
+    if extra_context is not None:
+        extra_context = extra_context.to(context.dtype)
+        if extra_context.device != context.device:
+            extra_context = extra_context.to(context.device)
+        context = torch.cat([extra_context, context], dim=1)
+
     # arguments
     kwargs = dict(
         e=e0,
@@ -185,6 +193,7 @@ def usp_attn_forward(self,
                      seq_lens,
                      grid_sizes,
                      freqs,
+                     entropy_collector=None,
                      dtype=torch.bfloat16):
     b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
     half_dtypes = (torch.float16, torch.bfloat16)

@@ -162,6 +162,8 @@ class VaceWanModel(WanModel):
         vace_context_scale=1.0,
         clip_fea=None,
         y=None,
+        entropy_collector=None,
+        extra_context=None,
     ):
         r"""
         Forward pass through the diffusion model
@@ -222,6 +224,12 @@ class VaceWanModel(WanModel):
                 for u in context
             ]))
 
+        if extra_context is not None:
+            extra_context = extra_context.to(context.dtype)
+            if extra_context.device != context.device:
+                extra_context = extra_context.to(context.device)
+            context = torch.cat([extra_context, context], dim=1)
+
         # if clip_fea is not None:
         #     context_clip = self.img_emb(clip_fea)  # bs x 257 x dim
         #     context = torch.concat([context_clip, context], dim=1)
@@ -239,8 +247,21 @@ class VaceWanModel(WanModel):
         kwargs['hints'] = hints
         kwargs['context_scale'] = vace_context_scale
 
-        for block in self.blocks:
-            x = block(x, **kwargs)
+        use_collector = entropy_collector if (
+            entropy_collector is not None
+            and getattr(entropy_collector, "enabled", False)) else None
+        if use_collector is not None and use_collector.block_idx is not None:
+            target_idx = use_collector.block_idx
+            if target_idx < 0:
+                target_idx = len(self.blocks) - 1
+        else:
+            target_idx = None
+
+        for idx, block in enumerate(self.blocks):
+            block_collector = None
+            if use_collector is not None and target_idx is not None:
+                block_collector = use_collector if idx == target_idx else None
+            x = block(x, **kwargs, entropy_collector=block_collector)
 
         # head
         x = self.head(x, e)

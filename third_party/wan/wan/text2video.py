@@ -1,10 +1,12 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import gc
+import json
 import logging
 import math
 import os
 import random
 import sys
+import time
 import types
 from contextlib import contextmanager
 from functools import partial
@@ -121,7 +123,18 @@ class WanT2V:
                  guide_scale=5.0,
                  n_prompt="",
                  seed=-1,
-                 offload_model=True):
+                 offload_model=True,
+                 keyframe_by_entropy=False,
+                 entropy_steps=5,
+                 entropy_mode="mean",
+                 entropy_ema_alpha=0.6,
+                 entropy_block_idx=-1,
+                 keyframe_topk=10,
+                 keyframe_cover=True,
+                 use_nonkey_context=True,
+                 debug_dir=None,
+                 save_debug_pt=True,
+                 profile_timing=True):
         r"""
         Generates video frames from text prompt using diffusion process.
 
@@ -146,6 +159,28 @@ class WanT2V:
                 Random seed for noise generation. If -1, use random seed.
             offload_model (`bool`, *optional*, defaults to True):
                 If True, offloads models to CPU during generation to save VRAM
+            keyframe_by_entropy (`bool`, *optional*, defaults to False):
+                If True, compute attention entropy in early steps and select keyframes.
+            entropy_steps (`int`, *optional*, defaults to 5):
+                Number of early denoising steps used to collect entropy.
+            entropy_mode (`str`, *optional*, defaults to "mean"):
+                Entropy aggregation mode: "last" | "mean" | "ema".
+            entropy_ema_alpha (`float`, *optional*, defaults to 0.6):
+                EMA decay for entropy_mode="ema".
+            entropy_block_idx (`int`, *optional*, defaults to -1):
+                Which transformer block to use for entropy (-1 means last).
+            keyframe_topk (`int`, *optional*, defaults to 10):
+                Number of keyframes to select in latent space.
+            keyframe_cover (`bool`, *optional*, defaults to True):
+                Enforce start/end coverage and bucket fill when selecting keyframes.
+            use_nonkey_context (`bool`, *optional*, defaults to True):
+                If True, add non-keyframe summary tokens as extra cross-attn context.
+            debug_dir (`str`, *optional*, defaults to None):
+                Directory for debug dumps (entropy, timing, keyframe indices).
+            save_debug_pt (`bool`, *optional*, defaults to True):
+                Whether to save per-step entropy tensors to debug_dir.
+            profile_timing (`bool`, *optional*, defaults to True):
+                Whether to record timing info into debug_dir.
 
         Returns:
             torch.Tensor:
@@ -164,6 +199,7 @@ class WanT2V:
         seq_len = math.ceil((target_shape[2] * target_shape[3]) /
                             (self.patch_size[1] * self.patch_size[2]) *
                             target_shape[1] / self.sp_size) * self.sp_size
+        seq_len_full = seq_len
 
         if n_prompt == "":
             n_prompt = self.sample_neg_prompt
@@ -200,6 +236,98 @@ class WanT2V:
 
         no_sync = getattr(self.model, 'no_sync', noop_no_sync)
 
+        # keyframe entropy setup
+        if keyframe_by_entropy and self.sp_size > 1:
+            logging.warning(
+                "Entropy-based keyframe selection is disabled under USP/context parallel."
+            )
+            keyframe_by_entropy = False
+
+        entropy_steps = int(entropy_steps)
+        if keyframe_by_entropy:
+            entropy_steps = max(1, entropy_steps)
+        else:
+            entropy_steps = 0
+
+        if debug_dir is not None and self.rank == 0:
+            os.makedirs(debug_dir, exist_ok=True)
+
+        def _write_json(path, payload):
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, ensure_ascii=True)
+
+        def _log_debug(msg):
+            if debug_dir is None or self.rank != 0:
+                return
+            log_path = os.path.join(debug_dir, "log.txt")
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(msg + "\n")
+
+        def calc_seq_len(f_lat):
+            target_shape_local = (
+                self.vae.model.z_dim,
+                int(f_lat),
+                size[1] // self.vae_stride[1],
+                size[0] // self.vae_stride[2],
+            )
+            return math.ceil((target_shape_local[2] * target_shape_local[3]) /
+                             (self.patch_size[1] * self.patch_size[2]) *
+                             target_shape_local[1] /
+                             self.sp_size) * self.sp_size
+
+        def select_keyframes(ent_1d, topk, cover=True):
+            f_lat = ent_1d.numel()
+            k = min(int(topk), f_lat)
+            if k <= 0:
+                return torch.arange(f_lat, device=ent_1d.device)
+            idx = torch.topk(ent_1d, k=k, largest=True).indices
+
+            if cover and f_lat >= 2 and k >= 2:
+                must = torch.tensor([0, f_lat - 1], device=ent_1d.device)
+                idx = torch.unique(torch.cat([idx, must], dim=0))
+
+                if idx.numel() > k:
+                    mask = torch.ones(f_lat, device=ent_1d.device, dtype=torch.bool)
+                    mask[must] = False
+                    remain_k = max(0, k - must.numel())
+                    if remain_k > 0:
+                        remain = torch.topk(ent_1d[mask], k=remain_k).indices
+                        remain_idx = torch.arange(f_lat, device=ent_1d.device)[mask][remain]
+                        idx = torch.unique(torch.cat([must, remain_idx], dim=0))
+                    else:
+                        idx = must
+
+                if idx.numel() < k:
+                    need = k - idx.numel()
+                    buckets = torch.linspace(
+                        0, f_lat - 1, steps=need + 2,
+                        device=ent_1d.device)[1:-1].round().long()
+                    idx = torch.unique(torch.cat([idx, buckets], dim=0))
+
+            return idx.sort().values
+
+        @torch.no_grad()
+        def build_nonkey_extra_context(nonkey_latent, model):
+            emb = model.patch_embedding(nonkey_latent.unsqueeze(0))
+            emb = emb.mean(dim=(3, 4))
+            return emb.permute(0, 2, 1).contiguous()
+
+        from .utils.entropy_collector import EntropyCollector
+
+        collector = EntropyCollector(
+            enabled=False,
+            mode=entropy_mode,
+            ema_alpha=entropy_ema_alpha,
+            block_idx=entropy_block_idx)
+        collector.reset()
+
+        key_idx = None
+        extra_context = None
+        seq_len_curr = seq_len_full
+
+        t0 = time.time()
+        t_entropy_end = None
+
         # evaluation mode
         with amp.autocast(dtype=self.param_dtype), torch.no_grad(), no_sync():
 
@@ -224,23 +352,38 @@ class WanT2V:
             else:
                 raise NotImplementedError("Unsupported solver.")
 
+            if entropy_steps > len(timesteps):
+                entropy_steps = len(timesteps)
+
             # sample videos
             latents = noise
 
-            arg_c = {'context': context, 'seq_len': seq_len}
-            arg_null = {'context': context_null, 'seq_len': seq_len}
-
-            for _, t in enumerate(tqdm(timesteps)):
+            for step_i, t in enumerate(tqdm(timesteps)):
                 latent_model_input = latents
                 timestep = [t]
 
                 timestep = torch.stack(timestep)
 
+                collect_entropy = keyframe_by_entropy and (step_i < entropy_steps)
+                collector.enabled = collect_entropy
+
                 self.model.to(self.device)
                 noise_pred_cond = self.model(
-                    latent_model_input, t=timestep, **arg_c)[0]
+                    latent_model_input,
+                    t=timestep,
+                    context=context,
+                    seq_len=seq_len_curr,
+                    entropy_collector=collector if collect_entropy else None,
+                    extra_context=extra_context,
+                )[0]
                 noise_pred_uncond = self.model(
-                    latent_model_input, t=timestep, **arg_null)[0]
+                    latent_model_input,
+                    t=timestep,
+                    context=context_null,
+                    seq_len=seq_len_curr,
+                    entropy_collector=None,
+                    extra_context=extra_context,
+                )[0]
 
                 noise_pred = noise_pred_uncond + guide_scale * (
                     noise_pred_cond - noise_pred_uncond)
@@ -253,12 +396,117 @@ class WanT2V:
                     generator=seed_g)[0]
                 latents = [temp_x0.squeeze(0)]
 
+                if collect_entropy and debug_dir is not None and save_debug_pt and self.rank == 0:
+                    ent_frame = collector.last_frame[0].detach().cpu()
+                    torch.save(
+                        ent_frame,
+                        os.path.join(debug_dir, f"entropy_frame_step_{step_i:02d}.pt"))
+
+                    if (collector.last_token is not None
+                            and collector.last_grid_sizes is not None
+                            and collector.last_seq_lens is not None):
+                        from .utils.attn_entropy import token_entropy_to_2dmap
+
+                        map2d = token_entropy_to_2dmap(
+                            collector.last_token.cpu(),
+                            collector.last_grid_sizes.cpu(),
+                            collector.last_seq_lens.cpu(),
+                        )[0]
+                        torch.save(
+                            map2d,
+                            os.path.join(debug_dir,
+                                         f"entropy_token_map_step_{step_i:02d}.pt"))
+
+                if keyframe_by_entropy and step_i == entropy_steps - 1:
+                    ent_final = collector.final()[0]
+                    key_idx = select_keyframes(
+                        ent_final, keyframe_topk, cover=keyframe_cover)
+
+                    all_idx = torch.arange(
+                        ent_final.numel(), device=key_idx.device)
+                    mask = torch.ones_like(all_idx, dtype=torch.bool)
+                    mask[key_idx] = False
+                    nonkey_idx = all_idx[mask]
+
+                    nonkey_lat = latents[0][:, nonkey_idx, :, :].detach()
+                    if use_nonkey_context and nonkey_lat.numel() > 0:
+                        extra_context = build_nonkey_extra_context(
+                            nonkey_lat, self.model).detach()
+
+                    latents = [latents[0][:, key_idx, :, :].contiguous()]
+                    seq_len_curr = calc_seq_len(latents[0].shape[1])
+                    t_entropy_end = time.time()
+
+                    if debug_dir is not None and self.rank == 0:
+                        torch.save(
+                            ent_final.detach().cpu(),
+                            os.path.join(
+                                debug_dir,
+                                f"entropy_frame_final_{entropy_mode}.pt"))
+                        torch.save(
+                            key_idx.detach().cpu(),
+                            os.path.join(debug_dir, "keyframes_idx_latent.pt"))
+                        pixel_idx = (key_idx * self.vae_stride[0]).detach().cpu()
+                        torch.save(
+                            pixel_idx,
+                            os.path.join(debug_dir, "keyframes_idx_pixel.pt"))
+
+                        _log_debug(
+                            f"Selected {key_idx.numel()} keyframes (latent idx): "
+                            f"{key_idx.detach().cpu().tolist()}")
+
             x0 = latents
+            t_denoise_end = time.time()
             if offload_model:
                 self.model.cpu()
                 torch.cuda.empty_cache()
             if self.rank == 0:
                 videos = self.vae.decode(x0)
+                t_decode_end = time.time()
+
+                if debug_dir is not None:
+                    run_cfg = dict(
+                        keyframe_by_entropy=keyframe_by_entropy,
+                        entropy_steps=entropy_steps,
+                        entropy_mode=entropy_mode,
+                        entropy_ema_alpha=entropy_ema_alpha,
+                        entropy_block_idx=entropy_block_idx,
+                        keyframe_topk=keyframe_topk,
+                        keyframe_cover=keyframe_cover,
+                        use_nonkey_context=use_nonkey_context,
+                        frame_num=frame_num,
+                        vae_stride=list(self.vae_stride),
+                        patch_size=list(self.patch_size),
+                    )
+                    _write_json(os.path.join(debug_dir, "run_config.json"),
+                                run_cfg)
+
+                    if key_idx is not None:
+                        meta = dict(
+                            key_idx_latent=key_idx.detach().cpu().tolist(),
+                            key_idx_pixel=(key_idx *
+                                           self.vae_stride[0]).detach().cpu().tolist(),
+                            frame_num_full=int(frame_num),
+                            latent_frames_full=int(target_shape[1]),
+                            stride_t=int(self.vae_stride[0]),
+                        )
+                        _write_json(
+                            os.path.join(debug_dir, "keyframes_meta.json"),
+                            meta)
+
+                    if profile_timing:
+                        timing = dict(
+                            total_sec=t_decode_end - t0,
+                            denoise_sec=t_denoise_end - t0,
+                            decode_sec=t_decode_end - t_denoise_end,
+                            entropy_steps=int(entropy_steps),
+                            final_latent_frames=int(x0[0].shape[1]),
+                        )
+                        if t_entropy_end is not None:
+                            timing["entropy_phase_sec"] = t_entropy_end - t0
+                            timing["post_entropy_sec"] = t_denoise_end - t_entropy_end
+                        _write_json(os.path.join(debug_dir, "timing.json"),
+                                    timing)
 
         del noise, latents
         del sample_scheduler
