@@ -134,7 +134,14 @@ class WanT2V:
                  use_nonkey_context=True,
                  debug_dir=None,
                  save_debug_pt=True,
-                 profile_timing=True):
+                 profile_timing=True,
+                 # ===== method-2: non-key low-frequency compute (TeaCache-style) =====
+                 nonkey_update_mode="none",
+                 nonkey_update_interval=5,
+                 teacache_rel_l1_thresh=0.02,
+                 teacache_max_skip=10,
+                 teacache_warmup=0,
+                 save_teacache_trace_png=True):
         r"""
         Generates video frames from text prompt using diffusion process.
 
@@ -181,6 +188,18 @@ class WanT2V:
                 Whether to save per-step entropy tensors to debug_dir.
             profile_timing (`bool`, *optional*, defaults to True):
                 Whether to record timing info into debug_dir.
+            nonkey_update_mode (`str`, *optional*, defaults to "none"):
+                Non-key update mode: "none" | "interval" | "teacache".
+            nonkey_update_interval (`int`, *optional*, defaults to 5):
+                Interval mode: update non-key every N steps.
+            teacache_rel_l1_thresh (`float`, *optional*, defaults to 0.02):
+                TeaCache indicator threshold.
+            teacache_max_skip (`int`, *optional*, defaults to 10):
+                TeaCache max consecutive skips before forcing update.
+            teacache_warmup (`int`, *optional*, defaults to 0):
+                TeaCache warmup steps after crop (force updates).
+            save_teacache_trace_png (`bool`, *optional*, defaults to True):
+                Save rel_l1 trace PNG into debug_dir.
 
         Returns:
             torch.Tensor:
@@ -312,6 +331,53 @@ class WanT2V:
             emb = emb.mean(dim=(3, 4))
             return emb.permute(0, 2, 1).contiguous()
 
+        @torch.no_grad()
+        def teacache_indicator(nonkey_latent, timestep_1d, model,
+                               seq_len_local):
+            """
+            TeaCache-style lightweight indicator.
+            nonkey_latent: [C, F, H, W]
+            timestep_1d: Tensor[B], here B=1
+            return: Tensor[dim] float32
+            """
+            x = model.patch_embedding(nonkey_latent.unsqueeze(0))
+            x = x.flatten(2).transpose(1, 2)
+            if x.size(1) < seq_len_local:
+                pad = x.new_zeros(1, seq_len_local - x.size(1), x.size(2))
+                x = torch.cat([x, pad], dim=1)
+
+            from .modules.model import sinusoidal_embedding_1d
+            with amp.autocast(dtype=torch.float32):
+                e = model.time_embedding(
+                    sinusoidal_embedding_1d(model.freq_dim,
+                                            timestep_1d).float())
+            ind = x.mean(dim=1) + e
+            return ind.squeeze(0).float()
+
+        def save_rel_l1_curve_png(trace, out_png):
+            if len(trace) == 0:
+                return
+            try:
+                import matplotlib.pyplot as plt
+
+                xs = [d["step"] for d in trace]
+                ys = [float(d["rel_l1"]) for d in trace]
+                ups_x = [d["step"] for d in trace if d["updated"]]
+                ups_y = [float(d["rel_l1"]) for d in trace if d["updated"]]
+
+                fig, ax = plt.subplots(figsize=(10, 4))
+                ax.plot(xs, ys)
+                if len(ups_x) > 0:
+                    ax.scatter(ups_x, ups_y, marker="o")
+                ax.set_xlabel("step")
+                ax.set_ylabel("nonkey rel_l1")
+                ax.grid(True, alpha=0.3)
+                os.makedirs(os.path.dirname(out_png), exist_ok=True)
+                plt.savefig(out_png, dpi=200, bbox_inches="tight")
+                plt.close(fig)
+            except Exception as e:
+                _log_debug(f"[warn] failed to save rel_l1 png: {e}")
+
         def reset_multistep_state(scheduler):
             if hasattr(scheduler, "config") and hasattr(scheduler.config, "solver_order"):
                 solver_order = int(scheduler.config.solver_order)
@@ -377,6 +443,17 @@ class WanT2V:
             # sample videos
             latents = noise
 
+            # ===== method-2 states (non-key low-frequency compute) =====
+            nonkey_latents = None
+            nonkey_seq_len = None
+            nonkey_scheduler = None
+            nonkey_noise_cache = None
+            nonkey_ind_prev = None
+            nonkey_start_step = None
+            nonkey_skip_streak = 0
+            nonkey_update_count = 0
+            nonkey_trace = []
+
             for step_i, t in enumerate(tqdm(timesteps)):
                 latent_model_input = latents
                 timestep = [t]
@@ -387,6 +464,102 @@ class WanT2V:
                 collector.enabled = collect_entropy
 
                 self.model.to(self.device)
+
+                # ===== method-2: update non-key latents with low-frequency DiT =====
+                if (key_idx is not None) and use_nonkey_context and (
+                        nonkey_latents is not None) and (nonkey_scheduler
+                                                         is not None):
+                    timestep_1d = torch.stack([t])
+
+                    rel_l1 = 0.0
+                    updated = False
+                    if nonkey_update_mode == "teacache":
+                        ind_now = teacache_indicator(nonkey_latents,
+                                                     timestep_1d, self.model,
+                                                     nonkey_seq_len)
+                        if nonkey_ind_prev is None:
+                            rel_l1 = 1e9
+                        else:
+                            denom = nonkey_ind_prev.abs().mean().clamp(min=1e-6)
+                            rel_l1 = (ind_now - nonkey_ind_prev).abs().mean() / denom
+                            rel_l1 = float(rel_l1.detach().cpu().item())
+                    else:
+                        rel_l1 = 0.0
+
+                    need_update = False
+                    if nonkey_noise_cache is None:
+                        need_update = True
+                    elif nonkey_update_mode == "interval":
+                        if nonkey_update_interval <= 0:
+                            need_update = False
+                        else:
+                            last_up = nonkey_trace[-1]["step"] if len(
+                                nonkey_trace) > 0 else (
+                                    nonkey_start_step
+                                    if nonkey_start_step is not None else step_i)
+                            need_update = (step_i - int(last_up)
+                                           ) >= int(nonkey_update_interval)
+                    elif nonkey_update_mode == "teacache":
+                        if nonkey_start_step is None:
+                            nonkey_start_step = step_i
+                        if (step_i -
+                                nonkey_start_step) < int(teacache_warmup):
+                            need_update = True
+                        else:
+                            if rel_l1 > float(teacache_rel_l1_thresh):
+                                need_update = True
+                            if nonkey_skip_streak >= int(teacache_max_skip):
+                                need_update = True
+                    else:
+                        need_update = False
+
+                    if need_update:
+                        latent_model_input_nk = [nonkey_latents]
+                        noise_pred_cond_nk = self.model(
+                            latent_model_input_nk,
+                            t=timestep_1d,
+                            context=context,
+                            seq_len=nonkey_seq_len,
+                            entropy_collector=None,
+                            extra_context=None,
+                        )[0]
+                        noise_pred_uncond_nk = self.model(
+                            latent_model_input_nk,
+                            t=timestep_1d,
+                            context=context_null,
+                            seq_len=nonkey_seq_len,
+                            entropy_collector=None,
+                            extra_context=None,
+                        )[0]
+                        nonkey_noise_cache = noise_pred_uncond_nk + guide_scale * (
+                            noise_pred_cond_nk - noise_pred_uncond_nk)
+
+                        nonkey_update_count += 1
+                        nonkey_skip_streak = 0
+                        updated = True
+                        if nonkey_update_mode == "teacache":
+                            nonkey_ind_prev = ind_now.detach()
+                    else:
+                        nonkey_skip_streak += 1
+
+                    temp_nk = nonkey_scheduler.step(
+                        nonkey_noise_cache.unsqueeze(0),
+                        t,
+                        nonkey_latents.unsqueeze(0),
+                        return_dict=False,
+                        generator=seed_g)[0]
+                    nonkey_latents = temp_nk.squeeze(0)
+
+                    extra_context = build_nonkey_extra_context(
+                        nonkey_latents, self.model).detach()
+
+                    if debug_dir is not None and self.rank == 0:
+                        nonkey_trace.append(
+                            dict(step=int(step_i),
+                                 t=float(t),
+                                 rel_l1=float(rel_l1),
+                                 updated=bool(updated)))
+
                 noise_pred_cond = self.model(
                     latent_model_input,
                     t=timestep,
@@ -463,6 +636,52 @@ class WanT2V:
                     nonkey_idx = all_idx[mask]
 
                     nonkey_lat = latents[0][:, nonkey_idx, :, :].detach()
+
+                    # ===== method-2 init: create nonkey_scheduler + state =====
+                    if use_nonkey_context and (nonkey_lat.numel() > 0) and (
+                            nonkey_update_mode in ["interval", "teacache"]):
+                        nonkey_latents = nonkey_lat.contiguous()
+                        nonkey_seq_len = calc_seq_len(
+                            nonkey_latents.shape[1])
+
+                        if sample_solver == 'unipc':
+                            nonkey_scheduler = FlowUniPCMultistepScheduler(
+                                num_train_timesteps=self.num_train_timesteps,
+                                shift=1,
+                                use_dynamic_shifting=False)
+                            nonkey_scheduler.set_timesteps(
+                                sampling_steps, device=self.device, shift=shift)
+                        elif sample_solver == 'dpm++':
+                            nonkey_scheduler = FlowDPMSolverMultistepScheduler(
+                                num_train_timesteps=self.num_train_timesteps,
+                                shift=1,
+                                use_dynamic_shifting=False)
+                            sampling_sigmas = get_sampling_sigmas(
+                                sampling_steps, shift)
+                            _ts, _ = retrieve_timesteps(
+                                nonkey_scheduler,
+                                device=self.device,
+                                sigmas=sampling_sigmas)
+                        else:
+                            nonkey_scheduler = None
+
+                        if nonkey_scheduler is not None:
+                            reset_multistep_state(nonkey_scheduler)
+
+                        nonkey_noise_cache = None
+                        nonkey_ind_prev = None
+                        nonkey_start_step = step_i + 1
+                        nonkey_skip_streak = 0
+                        nonkey_update_count = 0
+                        nonkey_trace = []
+
+                        _log_debug(
+                            f"[method-2] enabled nonkey_update_mode={nonkey_update_mode}, "
+                            f"interval={nonkey_update_interval}, "
+                            f"thr={teacache_rel_l1_thresh}, "
+                            f"max_skip={teacache_max_skip}, "
+                            f"warmup={teacache_warmup}")
+
                     if use_nonkey_context and nonkey_lat.numel() > 0:
                         extra_context = build_nonkey_extra_context(
                             nonkey_lat, self.model).detach()
@@ -536,12 +755,37 @@ class WanT2V:
                             decode_sec=t_decode_end - t_denoise_end,
                             entropy_steps=int(entropy_steps),
                             final_latent_frames=int(x0[0].shape[1]),
+                            nonkey_update_count=int(nonkey_update_count),
+                            nonkey_mode=str(nonkey_update_mode),
                         )
                         if t_entropy_end is not None:
                             timing["entropy_phase_sec"] = t_entropy_end - t0
                             timing["post_entropy_sec"] = t_denoise_end - t_entropy_end
                         _write_json(os.path.join(debug_dir, "timing.json"),
                                     timing)
+
+                    if nonkey_scheduler is not None:
+                        _write_json(
+                            os.path.join(debug_dir, "nonkey_update_trace.json"),
+                            nonkey_trace)
+                        _write_json(
+                            os.path.join(debug_dir, "nonkey_update_stats.json"),
+                            dict(
+                                update_count=int(nonkey_update_count),
+                                total_steps=int(len(timesteps)),
+                                mode=str(nonkey_update_mode),
+                                interval=int(nonkey_update_interval),
+                                rel_l1_thresh=float(teacache_rel_l1_thresh),
+                                max_skip=int(teacache_max_skip),
+                                warmup=int(teacache_warmup),
+                            ),
+                        )
+                        if save_teacache_trace_png:
+                            save_rel_l1_curve_png(
+                                nonkey_trace,
+                                os.path.join(debug_dir,
+                                             "nonkey_rel_l1_curve.png"),
+                            )
 
         del noise, latents
         del sample_scheduler

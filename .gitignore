@@ -19,6 +19,7 @@ output/
 results/
 logs/
 interpolation_outputs/
+debug/
 *.log
 
 # --------------- 数据集目录 ---------------

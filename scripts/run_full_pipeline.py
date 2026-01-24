@@ -72,6 +72,18 @@ def main() -> None:
     p.add_argument("--wan_keyframe_out_fps", type=float, default=None)
     p.add_argument("--wan_keyframe_target_fps", type=float, default=None)
 
+    # -------- WAN: method-2 non-key low-frequency compute --------
+    p.add_argument("--wan_nonkey_update_mode",
+                   type=str,
+                   default="none",
+                   choices=["none", "interval", "teacache"])
+    p.add_argument("--wan_nonkey_update_interval", type=int, default=5)
+    p.add_argument("--wan_teacache_rel_l1_thresh", type=float, default=0.02)
+    p.add_argument("--wan_teacache_max_skip", type=int, default=10)
+    p.add_argument("--wan_teacache_warmup", type=int, default=0)
+    p.add_argument("--wan_save_teacache_trace_png", action="store_true")
+    p.add_argument("--wan_no_save_teacache_trace_png", action="store_true")
+
     # -------- 插帧参数（你原来的 pipeline 参数）--------
     p.add_argument("--eden_config", type=str, required=True)
     p.add_argument("--output_path", type=str, default="interpolation_outputs/final.mp4")
@@ -155,6 +167,12 @@ def main() -> None:
     elif args.wan_profile_timing:
         profile_timing = True
 
+    save_teacache_trace_png = True
+    if args.wan_no_save_teacache_trace_png:
+        save_teacache_trace_png = False
+    elif args.wan_save_teacache_trace_png:
+        save_teacache_trace_png = True
+
     wan_cfg = WanGenerateConfig(
         task=args.wan_task,
         size=args.wan_size,
@@ -181,6 +199,12 @@ def main() -> None:
         profile_timing=profile_timing,
         keyframe_out_fps=args.wan_keyframe_out_fps,
         keyframe_target_fps=args.wan_keyframe_target_fps,
+        nonkey_update_mode=args.wan_nonkey_update_mode,
+        nonkey_update_interval=args.wan_nonkey_update_interval,
+        teacache_rel_l1_thresh=args.wan_teacache_rel_l1_thresh,
+        teacache_max_skip=args.wan_teacache_max_skip,
+        teacache_warmup=args.wan_teacache_warmup,
+        save_teacache_trace_png=save_teacache_trace_png,
         device_id=0,
         t5_cpu=False,
     )

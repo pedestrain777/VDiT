@@ -88,6 +88,14 @@ class WanGenerateConfig:
     keyframe_out_fps: Optional[float] = None
     keyframe_target_fps: Optional[float] = None
 
+    # -------- method-2: non-key low-frequency compute (TeaCache-style) --------
+    nonkey_update_mode: str = "none"
+    nonkey_update_interval: int = 5
+    teacache_rel_l1_thresh: float = 0.02
+    teacache_max_skip: int = 10
+    teacache_warmup: int = 0
+    save_teacache_trace_png: bool = True
+
     # -------- 设备相关 --------
     device_id: int = 0  # 与 wan-main/generate.py 的 device_id 对齐（int）
     t5_cpu: bool = False  # 如显存很紧，可 True 试试（会慢）
@@ -181,6 +189,12 @@ def generate_wan_frames(
         debug_dir=cfg.debug_dir,
         save_debug_pt=cfg.save_debug_pt,
         profile_timing=cfg.profile_timing,
+        nonkey_update_mode=cfg.nonkey_update_mode,
+        nonkey_update_interval=cfg.nonkey_update_interval,
+        teacache_rel_l1_thresh=cfg.teacache_rel_l1_thresh,
+        teacache_max_skip=cfg.teacache_max_skip,
+        teacache_warmup=cfg.teacache_warmup,
+        save_teacache_trace_png=cfg.save_teacache_trace_png,
     )
 
     if cfg.keyframe_by_entropy:
