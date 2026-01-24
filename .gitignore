@@ -20,7 +20,9 @@ results/
 logs/
 interpolation_outputs/
 debug/
+outputs/
 *.log
+
 
 # --------------- 数据集目录 ---------------
 dataset/

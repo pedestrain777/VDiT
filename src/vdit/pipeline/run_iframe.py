@@ -37,14 +37,22 @@ def run_interpolation_pipeline_from_frames(
     cfg: PipelineConfig,
     log_file: Optional[str] = None,
     save_keyframes_video_path: Optional[str] = None,
-) -> None:
+    return_timing: bool = False,
+) -> Optional[dict]:
     """
     核心插帧 pipeline（与 video_path 解耦）：
       关键帧(均匀/随机/全帧) -> 5信息融合打分 -> greedy_refine(自适应决定每段插多少帧) -> EDEN 插帧 -> 输出视频
 
     frames: [T,3,H,W] float in [0,1]
     fps_src: 输入视频 fps（对 duration 与 target_len 计算很重要）
+
+    return_timing=True 时，返回一个 timing dict（便于算加速比/拆分耗时）。
     """
+    import time
+
+    t_all0 = time.perf_counter()
+    timing: dict = {}
+
     if frames.ndim != 4 or frames.shape[1] != 3:
         raise ValueError(f"Expect frames [T,3,H,W], got {tuple(frames.shape)}")
     if fps_src <= 0:
@@ -56,7 +64,19 @@ def run_interpolation_pipeline_from_frames(
     if target_len < 2:
         raise ValueError("target_len < 2，输入视频太短或 target_fps 太小。")
 
+    timing.update(
+        dict(
+            input_num_frames=num_frames,
+            fps_src=float(fps_src),
+            duration_sec=float(duration),
+            target_fps=float(cfg.target_fps),
+            target_len=int(target_len),
+            keyframe_mode=str(cfg.keyframe_mode),
+        )
+    )
+
     # -------- 关键帧选择 --------
+    t0 = time.perf_counter()
     if cfg.keyframe_mode == "all":
         init_frames = [frames[i].unsqueeze(0).cpu() for i in range(num_frames)]
     elif cfg.keyframe_mode == "uniform":
@@ -65,11 +85,15 @@ def run_interpolation_pipeline_from_frames(
         init_frames = random_keyframes(frames, k=cfg.keyframes_k, seed=cfg.seed)
     else:
         raise ValueError(f"unknown keyframe_mode: {cfg.keyframe_mode}")
+    timing["keyframe_select_sec"] = float(time.perf_counter() - t0)
+    timing["keyframe_count"] = int(len(init_frames))
 
+    t0 = time.perf_counter()
     if save_keyframes_video_path is not None:
         keyframes_tensor = torch.cat(init_frames, dim=0)
         os.makedirs(os.path.dirname(save_keyframes_video_path) or ".", exist_ok=True)
         write_video_tensor(save_keyframes_video_path, keyframes_tensor, fps=float(fps_src))
+    timing["save_keyframes_video_sec"] = float(time.perf_counter() - t0)
 
     if len(init_frames) > target_len:
         raise ValueError(
@@ -78,17 +102,25 @@ def run_interpolation_pipeline_from_frames(
         )
 
     # -------- 插帧器与打分器 --------
+    t0 = time.perf_counter()
     eden = EdenInterpolator(
         config_path=cfg.eden_config,
         device=cfg.eden_device,
         use_split_gpu=cfg.use_split_gpu,
     )
+    timing["eden_init_sec"] = float(time.perf_counter() - t0)
 
+    t0 = time.perf_counter()
     raft = None
     if cfg.raft_ckpt:
         raft = RaftEstimator(model_path=cfg.raft_ckpt, device=cfg.raft_device)
+    timing["raft_init_sec"] = float(time.perf_counter() - t0)
+    timing["raft_enabled"] = bool(cfg.raft_ckpt)
 
+    t0 = time.perf_counter()
     scorer = IntervalScorer(raft=raft, weights=cfg.weights, topk_ratio=cfg.topk_ratio)
+    timing["scorer_init_sec"] = float(time.perf_counter() - t0)
+    timing["topk_ratio"] = float(cfg.topk_ratio)
 
     def score_fn(a: torch.Tensor, b: torch.Tensor) -> float:
         return float(scorer(a, b))
@@ -97,6 +129,7 @@ def run_interpolation_pipeline_from_frames(
         return eden.interpolate(a, b)
 
     # -------- 自适应插帧数量 --------
+    t0 = time.perf_counter()
     out_frames = greedy_refine(
         init_frames,
         target_len=target_len,
@@ -105,10 +138,17 @@ def run_interpolation_pipeline_from_frames(
         verbose=True,
         log_file=log_file,
     )
+    timing["greedy_refine_sec"] = float(time.perf_counter() - t0)
 
+    t0 = time.perf_counter()
     out = torch.cat(out_frames, dim=0)  # [T,3,H,W]
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     write_video_tensor(output_path, out, fps=cfg.target_fps)
+    timing["write_output_sec"] = float(time.perf_counter() - t0)
+    timing["total_iframe_sec"] = float(time.perf_counter() - t_all0)
+    timing["output_num_frames"] = int(out.shape[0])
+
+    return timing if return_timing else None
 
 
 def run_interpolation_pipeline(
@@ -129,4 +169,3 @@ def run_interpolation_pipeline(
         cfg=cfg,
         log_file=log_file,
     )
-

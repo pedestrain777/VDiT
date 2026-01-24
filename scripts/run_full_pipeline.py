@@ -105,6 +105,25 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--topk_ratio", type=float, default=0.1)
 
+    # -------- NEW: 可选 baseline（WAN 生成完整视频）用于对比 --------
+    p.add_argument(
+        "--wan_generate_full_baseline",
+        action="store_true",
+        help="Also generate a full WAN video (same prompt/seed/steps/solver) for comparison.",
+    )
+    p.add_argument(
+        "--save_wan_full_baseline_video",
+        type=str,
+        default=None,
+        help="If set, save the baseline full WAN video to this path.",
+    )
+    p.add_argument(
+        "--metrics_json",
+        type=str,
+        default=None,
+        help="If set, save timing/speedup metrics to this json path. Default: <output>.metrics.json",
+    )
+
     # 可选：保存 WAN 中间视频
     p.add_argument("--save_wan_video", type=str, default=None, help="save WAN raw/downsampled video for debugging")
     p.add_argument(
@@ -134,6 +153,10 @@ def main() -> None:
         os.makedirs(os.path.dirname(args.save_sampled_video) or ".", exist_ok=True)
     if args.save_keyframes_video:
         os.makedirs(os.path.dirname(args.save_keyframes_video) or ".", exist_ok=True)
+    if args.save_wan_full_baseline_video:
+        os.makedirs(os.path.dirname(args.save_wan_full_baseline_video) or ".", exist_ok=True)
+    if args.metrics_json:
+        os.makedirs(os.path.dirname(args.metrics_json) or ".", exist_ok=True)
     if args.wan_entropy_debug_dir:
         os.makedirs(args.wan_entropy_debug_dir, exist_ok=True)
 
@@ -235,6 +258,9 @@ def main() -> None:
         save_sampled_video_path=args.save_sampled_video,
         save_keyframes_video_path=args.save_keyframes_video,
         save_wan_video_path=args.save_wan_video,
+        generate_wan_full_baseline=args.wan_generate_full_baseline,
+        save_wan_full_baseline_video_path=args.save_wan_full_baseline_video,
+        metrics_json_path=args.metrics_json,
     )
 
 

@@ -1,9 +1,12 @@
-# src/pipeline/full_pipeline.py
+# src/vdit/pipeline/full_pipeline.py
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, replace
+from typing import Optional, Dict, Any
+import os
+import json
+import time
 
 import torch
 
@@ -13,13 +16,32 @@ from vdit.pipeline.run_iframe import PipelineConfig, run_interpolation_pipeline_
 from vdit.pipeline.video_io import read_video_tensor, write_video_tensor
 
 
+def _ensure_parent_dir(path: Optional[str]) -> None:
+    if not path:
+        return
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+
+
+def _write_json(path: str, obj: Dict[str, Any]) -> None:
+    _ensure_parent_dir(path)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+
+
+def _read_json_if_exists(path: str) -> Optional[Dict[str, Any]]:
+    try:
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        return None
+    return None
+
+
 @dataclass(frozen=True)
 class FullPipelineConfig:
-    # WAN 生成配置
     wan: WanGenerateConfig
-    # 插帧配置（你原来的 PipelineConfig）
     iframe: PipelineConfig
-    # 生成器名称（插件化）
     generator_name: str = "wan"
 
 
@@ -36,47 +58,166 @@ def run_full_pipeline(
     save_sampled_video_path: Optional[str] = None,
     save_keyframes_video_path: Optional[str] = None,
     save_wan_video_path: Optional[str] = None,
-) -> None:
-    """
-    完整 baseline：
-      WAN(1.3B) -> 生成视频 -> (可选: 按 out_fps 均匀/随机取帧) -> 信息计算/自适应插帧 -> EDEN -> 输出
-      
-    或者从已有视频开始：
-      已有视频 -> 信息计算/自适应插帧 -> EDEN -> 输出
+    generate_wan_full_baseline: bool = False,
+    save_wan_full_baseline_video_path: Optional[str] = None,
+    metrics_json_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    if metrics_json_path is None:
+        base = os.path.splitext(output_path)[0]
+        metrics_json_path = base + ".metrics.json"
 
-    说明：
-      - 如果提供 input_video，则跳过 WAN 生成，直接从该视频开始插帧（节省时间）
-      - 如果使用 WAN 生成，"均匀/随机取帧"有两种方式：
-        A) WAN 内部按 out_fps resample（cfg.wan.out_fps 不为 None 时启用）
-        B) 插帧阶段 keyframe_mode=uniform/random （cfg.iframe.keyframe_mode）
-      - 如果你想严格对应“先取帧再插帧”，建议：
-          cfg.wan.out_fps=8/12 + cfg.wan.frame_sample=uniform/random
-          并设置 cfg.iframe.keyframe_mode="all"
-        因为这表示：先把 WAN 输出直接变成“关键帧序列”，插帧模块不再二次采样。
-    """
-    
-    # 判断是从已有视频开始还是从 WAN 生成开始
+    t_pipeline0 = time.perf_counter()
+    metrics: Dict[str, Any] = {
+        "output_path": output_path,
+        "input_video": input_video,
+        "wan_ckpt_dir": wan_ckpt_dir,
+        "prompt": prompt,
+        "generator_name": cfg.generator_name,
+        "wan_cfg": cfg.wan.__dict__,
+        "iframe_cfg": {
+            "eden_config": cfg.iframe.eden_config,
+            "raft_ckpt": cfg.iframe.raft_ckpt,
+            "raft_device": cfg.iframe.raft_device,
+            "eden_device": cfg.iframe.eden_device,
+            "use_split_gpu": cfg.iframe.use_split_gpu,
+            "target_fps": cfg.iframe.target_fps,
+            "keyframe_mode": cfg.iframe.keyframe_mode,
+            "keyframes_k": cfg.iframe.keyframes_k,
+            "seed": cfg.iframe.seed,
+            "topk_ratio": cfg.iframe.topk_ratio,
+        },
+        "timing": {},
+        "speedup": {},
+    }
+
+    # -------- 从已有视频开始：只插帧，不做 baseline --------
     if input_video:
-        # 从已有视频开始（跳过 WAN 生成）
+        t0 = time.perf_counter()
         frames, info = read_video_tensor(input_video)
-        fps_src = float(input_fps) if input_fps is not None else info.fps
-    else:
-        # 从 WAN 生成开始（原始流程）
+        fps_src = float(input_fps) if input_fps is not None else float(info.fps)
+        metrics["timing"]["read_input_video_sec"] = float(time.perf_counter() - t0)
+        metrics["io"] = {"fps_src": float(fps_src), "num_frames": int(frames.shape[0])}
+
+        sampled_video_path = save_sampled_video_path or save_wan_video_path
+        if sampled_video_path:
+            _ensure_parent_dir(sampled_video_path)
+            write_video_tensor(sampled_video_path, frames, fps=float(fps_src))
+
+        t0 = time.perf_counter()
+        iframe_timing = run_interpolation_pipeline_from_frames(
+            frames=frames,
+            fps_src=fps_src,
+            output_path=output_path,
+            cfg=cfg.iframe,
+            log_file=log_file,
+            save_keyframes_video_path=save_keyframes_video_path,
+            return_timing=True,
+        ) or {}
+        metrics["timing"]["iframe_wall_sec"] = float(time.perf_counter() - t0)
+        metrics["iframe_timing"] = iframe_timing
+
+        metrics["timing"]["pipeline_total_sec"] = float(time.perf_counter() - t_pipeline0)
+        _write_json(metrics_json_path, metrics)
+        return metrics
+
+    # -------- baseline WAN full generation（可选）--------
+    baseline_wan_timing = None
+    if generate_wan_full_baseline:
         if prompt is None or wan_ckpt_dir is None:
-            raise ValueError("Must provide either (input_video) or (prompt + wan_ckpt_dir)")
-        generator = create_generator(cfg.generator_name, ckpt_dir=wan_ckpt_dir, cfg=cfg.wan)
-        frames, fps_src = generator.generate(prompt)
+            raise ValueError("generate_wan_full_baseline=True requires prompt + wan_ckpt_dir")
+
+        baseline_debug_dir = None
+        if cfg.wan.debug_dir:
+            baseline_debug_dir = os.path.join(str(cfg.wan.debug_dir), "baseline_full")
+
+        wan_baseline_cfg = replace(
+            cfg.wan,
+            keyframe_by_entropy=False,
+            out_fps=None,
+            debug_dir=baseline_debug_dir,
+        )
+
+        t0 = time.perf_counter()
+        gen_base = create_generator(cfg.generator_name, ckpt_dir=wan_ckpt_dir, cfg=wan_baseline_cfg)
+        baseline_frames, baseline_fps = gen_base.generate(prompt)
+        metrics["timing"]["wan_full_baseline_wall_sec"] = float(time.perf_counter() - t0)
+        metrics["baseline"] = {
+            "fps": float(baseline_fps),
+            "num_frames": int(baseline_frames.shape[0]),
+            "debug_dir": baseline_debug_dir,
+        }
+
+        if baseline_debug_dir:
+            baseline_wan_timing = _read_json_if_exists(os.path.join(baseline_debug_dir, "timing.json"))
+            if baseline_wan_timing is not None:
+                metrics["baseline"]["wan_internal_timing"] = baseline_wan_timing
+
+        if save_wan_full_baseline_video_path:
+            _ensure_parent_dir(save_wan_full_baseline_video_path)
+            write_video_tensor(save_wan_full_baseline_video_path, baseline_frames, fps=float(baseline_fps))
+
+    # -------- main WAN generation（你的关键帧/Method2/完整等）--------
+    if prompt is None or wan_ckpt_dir is None:
+        raise ValueError("Must provide either (input_video) or (prompt + wan_ckpt_dir)")
+
+    t0 = time.perf_counter()
+    generator = create_generator(cfg.generator_name, ckpt_dir=wan_ckpt_dir, cfg=cfg.wan)
+    frames, fps_src = generator.generate(prompt)
+    metrics["timing"]["wan_main_wall_sec"] = float(time.perf_counter() - t0)
+    metrics["io"] = {"fps_src": float(fps_src), "num_frames": int(frames.shape[0])}
+
+    if cfg.wan.debug_dir:
+        wan_internal_timing = _read_json_if_exists(os.path.join(str(cfg.wan.debug_dir), "timing.json"))
+        if wan_internal_timing is not None:
+            metrics["wan_internal_timing"] = wan_internal_timing
 
     sampled_video_path = save_sampled_video_path or save_wan_video_path
     if sampled_video_path:
+        _ensure_parent_dir(sampled_video_path)
         write_video_tensor(sampled_video_path, frames, fps=float(fps_src))
 
-    # 进入插帧 pipeline（不落盘中间 mp4，直接 tensor 传递）
-    run_interpolation_pipeline_from_frames(
+    # -------- iframe（插帧阶段）--------
+    t0 = time.perf_counter()
+    iframe_timing = run_interpolation_pipeline_from_frames(
         frames=frames,
         fps_src=fps_src,
         output_path=output_path,
         cfg=cfg.iframe,
         log_file=log_file,
         save_keyframes_video_path=save_keyframes_video_path,
-    )
+        return_timing=True,
+    ) or {}
+    metrics["timing"]["iframe_wall_sec"] = float(time.perf_counter() - t0)
+    metrics["iframe_timing"] = iframe_timing
+
+    metrics["timing"]["pipeline_total_sec"] = float(time.perf_counter() - t_pipeline0)
+
+    # -------- speedup / time ratio --------
+    speedup: Dict[str, Any] = {}
+    wan_main = float(metrics["timing"].get("wan_main_wall_sec", 0.0))
+    iframe_wall = float(metrics["timing"].get("iframe_wall_sec", 0.0))
+    total = float(metrics["timing"].get("pipeline_total_sec", 0.0))
+    speedup["wan_main_over_iframe"] = (wan_main / iframe_wall) if iframe_wall > 0 else None
+    speedup["iframe_over_wan_main"] = (iframe_wall / wan_main) if wan_main > 0 else None
+    speedup["total_over_wan_main"] = (total / wan_main) if wan_main > 0 else None
+
+    if generate_wan_full_baseline and metrics["timing"].get("wan_full_baseline_wall_sec", 0.0) > 0:
+        wan_full_wall = float(metrics["timing"]["wan_full_baseline_wall_sec"])
+        speedup["wan_full_wall_over_wan_main_wall"] = (wan_full_wall / wan_main) if wan_main > 0 else None
+        speedup["wan_main_wall_over_wan_full_wall"] = (wan_main / wan_full_wall) if wan_full_wall > 0 else None
+
+    # 更公平：用 WAN 内部 timing.json 的 denoise_sec 做 speedup
+    try:
+        if baseline_wan_timing and ("denoise_sec" in baseline_wan_timing) and ("wan_internal_timing" in metrics):
+            den_full = float(baseline_wan_timing.get("denoise_sec", 0.0))
+            den_main = float(metrics["wan_internal_timing"].get("denoise_sec", 0.0))
+            if den_full > 0 and den_main > 0:
+                speedup["wan_full_denoise_over_wan_main_denoise"] = den_full / den_main
+                speedup["wan_main_denoise_over_wan_full_denoise"] = den_main / den_full
+    except Exception:
+        pass
+
+    metrics["speedup"] = speedup
+
+    _write_json(metrics_json_path, metrics)
+    return metrics
